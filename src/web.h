@@ -115,7 +115,7 @@ const char CONFIG_HTML[] PROGMEM = R"HTML(
 <div class="times" id="nt"><input type="time" id="nfrom"><span>bis</span><input type="time" id="nto"></div></section>
 
 <section><h2>Aussehen</h2>
-<label>Schrift</label><div class="seg" id="font"><button type="button" data-f="sans">Normal</button><button type="button" data-f="pixel">Pixel (LED)</button></div>
+<label>Schrift</label><div class="seg" id="font"><button type="button" data-f="sans">Normal</button><button type="button" data-f="pixel">Pixel (LED)</button><button type="button" data-f="flap">Fallblatt</button></div>
 <label>Farben</label><div class="presets" id="pre"></div>
 <details><summary>Eigene Farben</summary><div id="cols" class="grid" style="margin-top:10px"></div></details></section>
 

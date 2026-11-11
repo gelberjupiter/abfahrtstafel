@@ -83,7 +83,7 @@ volatile uint32_t cfgGen = 0;
 bool nightOn = false;
 int nightFrom = 0, nightTo = 6 * 60;
 volatile bool nightNow = false;
-bool pixelFont = false;
+bool pixelFont = false, flapFont = false;
 SemaphoreHandle_t cfgMutex, depMutex;
 Preferences prefs;
 
@@ -93,6 +93,8 @@ WebServer server(80);
 DNSServer dns;
 TaskHandle_t fetchHandle = nullptr;
 uint32_t infoUntil = 0, wakeUntil = 0;
+int lastSec = -1;
+bool tick();
 volatile bool updating = false;
 volatile uint32_t fetchAlive = 0, serverSeen = 0;
 
@@ -122,8 +124,12 @@ uint8_t stStatus[MAX_ST];
 uint32_t rowSig[MAX_ROWS], hdrSig;
 bool bottomDirty = true;
 
+char prevDest[MAX_ROWS][48], prevMin[MAX_ROWS][8], prevClock[2][4];
 void invalidate() {
   memset(rowSig, 0, sizeof rowSig);
+  memset(prevDest, 0, sizeof prevDest);
+  memset(prevMin, 0, sizeof prevMin);
+  memset(prevClock, 0, sizeof prevClock);
   hdrSig = 0;
   bottomDirty = true;
 }
@@ -226,6 +232,8 @@ int dotWidth(const char* s, int size) {
 
 void dotDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t color) {
   const int p = dotPitch(size), top = baseline - 7 * p;
+  if (size == BIG) x -= x % 3;  // aufs Punkteraster
+  else g.fillRect(x - 1, top - 1, dotWidth(s, size) + 3, 7 * p + 1, C_BG);
   int f, l;
   for (; *s; s++) {
     const uint8_t* gl = glyph(*s, f, l);
@@ -239,6 +247,15 @@ void dotDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t
 }
 
 inline bool usesDots(int size) { return pixelFont && size <= SMALL; }
+
+inline uint16_t dimDot(uint16_t bg) { return tft.alphaBlend(40, C_WHITE, bg); }
+
+void dotGrid(TFT_eSPI& g, int h, int yOff, uint16_t bg) {
+  if (!pixelFont) return;
+  const uint16_t c = dimDot(bg);
+  for (int y = yOff; y + 2 <= h; y += 3)
+    for (int x = 0; x + 2 <= SCREEN_W; x += 3) g.fillRect(x, y, 2, 2, c);
+}
 
 void setFont(TFT_eSPI& g, int size) {
   if (size == UI2) g.setTextFont(2);
@@ -352,7 +369,10 @@ void applyConfig(JsonVariantConst j) {
     cfgNumSt = n;
   }
   nightOn = nOn; nightFrom = nFrom; nightTo = nTo;
-  if (j["font"].is<const char*>()) pixelFont = !strcmp(j["font"], "pixel");
+  if (j["font"].is<const char*>()) {
+    pixelFont = !strcmp(j["font"], "pixel");
+    flapFont = !strcmp(j["font"], "flap");
+  }
   cfgGen++;
   xSemaphoreGive(cfgMutex);
   invalidate();
@@ -370,7 +390,7 @@ void configToJson(JsonDocument& d, bool forWeb) {
     if (cfgSt[i].train) o["to"] = cfgSt[i].to; else o["lines"] = cfgSt[i].lines;
     o["walk"] = cfgSt[i].walk;
   }
-  d["font"] = pixelFont ? "pixel" : "sans";
+  d["font"] = pixelFont ? "pixel" : flapFont ? "flap" : "sans";
   d["night"]["on"] = nightOn;
   snprintf(buf, sizeof buf, "%02d:%02d", nightFrom / 60, nightFrom % 60);
   d["night"]["from"] = buf;
@@ -740,7 +760,7 @@ void drawVehicle(TFT_eSPI& g, int xRight, int cy, uint16_t c) {
 
 void drawPixelVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c) {
   const uint16_t* bm = isBus(cat) ? PIX_BUS : isTram(cat) ? PIX_TRAM : PIX_TRAIN;
-  const int x0 = xRight - PIX_VEH_W, y0 = cy - 12;
+  const int x0 = (xRight - PIX_VEH_W) / 3 * 3, y0 = cy - 13;
   for (int ry = 0; ry < 8; ry++)
     for (int cx = 0; cx < 9; cx++)
       if (bm[ry] & (1 << (8 - cx))) g.fillRect(x0 + cx * 3, y0 + ry * 3, 2, 2, c);
@@ -767,7 +787,7 @@ void drawPixelLine(TFT_eSPI& g, const char* label, int x) {
   else drawLabel(g, label, x, BASE - 1, maxW, C_WHITE, SMALL);
 }
 
-void drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
+int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   const char* cat = d.cat;
   bool tram = isTram(cat), bus = isBus(cat), boat = isBoat(cat);
   const int y = cy - BADGE_H / 2;
@@ -778,7 +798,7 @@ void drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
     if (tram || bus || boat) snprintf(label, sizeof label, "%s", d.line[0] ? d.line : cat);
     else snprintf(label, sizeof label, "%s%s", cat, num);
     drawPixelLine(g, label, x);
-    return;
+    return 0;
   }
 
   if (tram || bus || boat) {
@@ -789,7 +809,7 @@ void drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
     if (lum565(bg) < 50) g.drawRoundRect(x, y, w, BADGE_H, 3, TFT_WHITE);
     txtDraw(g, label, x + (w - txtWidth(g, label, SMALL)) / 2, cy + 6, SMALL,
             lum565(bg) > 150 ? TFT_BLACK : TFT_WHITE);
-    return;
+    return w;
   }
 
   bool sbahn = isCat(cat, {"S", "SN"}), regio = isCat(cat, {"RE", "R", "REX"});
@@ -803,10 +823,72 @@ void drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   g.drawRect(x, y, w, BADGE_H, border);
   if (regio) g.drawRect(x + 1, y + 1, w - 2, BADGE_H - 2, border);
   drawItalic(g, label, x + w / 2, cy, fg);
+  return w;
 }
+
+// ===================== Fallblatt =====================
+// Ziel auf einem breiten Modul (wie die gedruckten Ortsnamen der SBB-Tafeln), Ziffern einzeln.
+// stage 0 = steht, 1/2 = obere Hälfte schon neu, untere noch alt (Blatt fällt)
+static const int FLAP_W = 15, FLAP_P = 17, FLAP_H = 27;
+
+uint16_t flapColor() { return lum565(C_BG) < 40 ? rgb(44, 44, 48) : tft.alphaBlend(90, C_BG, TFT_BLACK); }
+
+void flapModule(TFT_eSPI& g, int x, int top, int w, const char* now, const char* old, int stage,
+                int tx, int baseline, int maxW, uint16_t color) {
+  const int half = FLAP_H / 2;
+  const uint16_t tc = flapColor(), lo = tft.alphaBlend(190, tc, TFT_BLACK);
+  g.fillRect(x, top, w, half, tc);
+  g.fillRect(x, top + half, w, FLAP_H - half, lo);
+  auto text = [&](const char* s, int y0, int h) {
+    if (!*s) return;
+    g.setViewport(x, y0, w, h, false);
+    drawLabel(g, s, tx < 0 ? x + (w - txtWidth(g, s, BIG)) / 2 : tx, baseline, maxW, color, BIG);
+    g.resetViewport();
+  };
+  if (!stage) {
+    text(now, top, FLAP_H);
+  } else {
+    text(now, top, half);
+    text(old, top + half, FLAP_H - half);
+    if (stage == 2) g.fillRect(x, top + half, w, half / 2, tc);  // Rückseite des fallenden Blatts
+  }
+  g.drawFastHLine(x, top + half, w, TFT_BLACK);
+}
+
+int flapCharsWidth(TFT_eSPI& g, const char* s) {
+  char ch[2] = {0, 0};
+  int w = 0;
+  for (; *s; s++) {
+    if (isdigit((uint8_t)*s)) { w += FLAP_P; continue; }
+    ch[0] = *s;
+    w += txtWidth(g, ch, BIG) + 2;
+  }
+  return w;
+}
+
+// Ziffern je auf eigenem Blatt, rechtsbündig mit dem alten Text verglichen
+void flapChars(TFT_eSPI& g, const char* s, const char* old, int x, int top, int baseline, uint16_t color, int stage) {
+  const int n = strlen(s), on = strlen(old);
+  char a[2] = {0, 0}, b[2] = {0, 0};
+  for (int i = 0; i < n; i++) {
+    a[0] = s[i];
+    if (isdigit((uint8_t)s[i])) {
+      const int j = i + on - n;
+      b[0] = j >= 0 ? old[j] : 0;
+      flapModule(g, x, top, FLAP_W, a, b, b[0] == a[0] ? 0 : stage, -1, baseline, 0, color);
+      x += FLAP_P;
+    } else {
+      txtDraw(g, a, x + 1, baseline, BIG, color);
+      x += txtWidth(g, a, BIG) + 2;
+    }
+  }
+}
+
+inline void flapPause() { delay(45); }
 
 void drawTitleBar(const char* title) {
   hdr.fillSprite(C_HDR);
+  dotGrid(hdr, HEADER_H, 1, C_HDR);
   drawLabel(hdr, title, 8, HDR_BASE, 304, C_WHITE);
   hdr.pushSprite(0, 0);
 }
@@ -817,20 +899,35 @@ void drawHeader(const tm& t, bool colon, bool stale) {
   sig.val(t.tm_hour).val(t.tm_min).val(stale).val(cfgGen).str(cfgTitle.c_str());
   if (sig.get() != hdrSig) {
     hdrSig = sig.get();
-    hdr.fillSprite(C_HDR);
-    drawLabel(hdr, cfgTitle.c_str(), 8, HDR_BASE, 220, C_WHITE);
     char hh[4], mm[4];
     snprintf(hh, sizeof hh, "%02d", t.tm_hour);
     snprintf(mm, sizeof mm, "%02d", t.tm_min);
-    txtDraw(hdr, hh, CLOCK_X - 4 - txtWidth(hdr, hh, BIG), HDR_BASE, BIG, C_WHITE);
-    txtDraw(hdr, mm, CLOCK_X + 4, HDR_BASE, BIG, C_WHITE);
-    if (stale) hdr.fillCircle(240, HEADER_H / 2, 4, C_YELLOW);
-    hdr.pushSprite(0, 0);
+    auto render = [&](int stage) {
+      hdr.fillSprite(C_HDR);
+      dotGrid(hdr, HEADER_H, 1, C_HDR);
+      drawLabel(hdr, cfgTitle.c_str(), 8, HDR_BASE, 220, C_WHITE);
+      if (flapFont) {
+        flapChars(hdr, hh, prevClock[0], CLOCK_X - 4 - flapCharsWidth(hdr, hh), HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
+        flapChars(hdr, mm, prevClock[1], CLOCK_X + 4, HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
+      } else {
+        txtDraw(hdr, hh, CLOCK_X - 4 - txtWidth(hdr, hh, BIG), HDR_BASE, BIG, C_WHITE);
+        txtDraw(hdr, mm, CLOCK_X + 4, HDR_BASE, BIG, C_WHITE);
+      }
+      if (stale) hdr.fillCircle(flapFont ? 234 : 240, HEADER_H / 2, 4, C_YELLOW);
+      hdr.pushSprite(0, 0);
+    };
+    if (flapFont && (strcmp(hh, prevClock[0]) || strcmp(mm, prevClock[1]))) {
+      render(1); flapPause();
+      render(2); flapPause();
+    }
+    render(0);
+    strcpy(prevClock[0], hh);
+    strcpy(prevClock[1], mm);
   }
-  const int s = pixelFont ? 2 : 3;
-  const uint16_t c = colon ? C_WHITE : C_HDR;
-  tft.fillRect(CLOCK_X - 1, HDR_BASE - (pixelFont ? 15 : 14), s, s, c);
-  tft.fillRect(CLOCK_X - 1, HDR_BASE - 6, s, s, c);
+  const int s = pixelFont ? 2 : 3, x = pixelFont ? CLOCK_X : CLOCK_X - 1;
+  const uint16_t c = colon ? C_WHITE : pixelFont ? dimDot(C_HDR) : C_HDR;
+  tft.fillRect(x, HDR_BASE - (pixelFont ? 15 : 14), s, s, c);
+  tft.fillRect(x, HDR_BASE - 6, s, s, c);
 }
 
 inline int rowY(int r) { return HEADER_H + r * ROW_H; }
@@ -844,6 +941,7 @@ void fillBottom() {
 
 void beginRow() {
   row.fillSprite(C_BG);
+  dotGrid(row, ROW_H - 1, 0, C_BG);
   row.drawFastHLine(0, ROW_H - 1, SCREEN_W, C_LINE);
 }
 
@@ -852,7 +950,8 @@ void drawMessageRow(int r, const char* msg) {
   if (sig == rowSig[r]) return;
   rowSig[r] = sig;
   beginRow();
-  drawLabel(row, msg, DEST_X, BASE, 250, C_LABEL);
+  if (flapFont && *msg) flapModule(row, DEST_X - 5, 3, MIN_RIGHT - DEST_X + 5, msg, "", 0, DEST_X, BASE, 248, C_LABEL);
+  else drawLabel(row, msg, DEST_X, BASE, 250, C_LABEL);
   row.pushSprite(0, rowY(r));
 }
 
@@ -877,29 +976,46 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
   if (sig.get() == rowSig[r]) return;
   rowSig[r] = sig.get();
 
-  beginRow();
-  if (d) {
-    drawBadge(row, *d, 6, ROW_H / 2);
-    int minW;
-    if (leaving) {
-      minW = pixelFont ? PIX_VEH_W : VEH_W;
-      if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
-                           : drawVehicle(row, MIN_RIGHT, ROW_H / 2, c);
-    } else {
-      minW = txtWidth(row, buf, BIG);
-      txtDraw(row, buf, MIN_RIGHT - minW, BASE, BIG, c);
+  auto render = [&](int stage) {
+    beginRow();
+    if (d) {
+      int bw = drawBadge(row, *d, 6, ROW_H / 2);
+      if (flapFont) row.drawFastHLine(6, ROW_H / 2, bw, TFT_BLACK);
+      int minW;
+      if (leaving) {
+        minW = pixelFont ? PIX_VEH_W : VEH_W;
+        if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
+                             : drawVehicle(row, MIN_RIGHT, ROW_H / 2, c);
+      } else if (flapFont) {
+        minW = flapCharsWidth(row, buf);
+        flapChars(row, buf, prevMin[r], MIN_RIGHT - minW, 3, BASE, c, stage);
+      } else {
+        minW = txtWidth(row, buf, BIG);
+        txtDraw(row, buf, MIN_RIGHT - minW, BASE, BIG, c);
+      }
+      int right = MIN_RIGHT - minW - 10;
+      if (d->platform[0]) {
+        char pl[14];
+        snprintf(pl, sizeof pl, "Gl. %s", d->platform);
+        int pw = txtWidth(row, pl, SMALL);
+        txtDraw(row, pl, right - pw, BASE - (pixelFont ? 2 : 1), SMALL, C_LABEL);
+        right -= pw + 10;
+      }
+      if (flapFont)
+        flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, d->dest, prevDest[r], stage, DEST_X, BASE,
+                   right - DEST_X, C_WHITE);
+      else
+        drawLabel(row, d->dest, DEST_X, BASE, right - DEST_X, C_WHITE);
     }
-    int right = MIN_RIGHT - minW - 10;
-    if (d->platform[0]) {
-      char pl[14];
-      snprintf(pl, sizeof pl, "Gl. %s", d->platform);
-      int pw = txtWidth(row, pl, SMALL);
-      txtDraw(row, pl, right - pw, BASE - (pixelFont ? 2 : 1), SMALL, C_LABEL);
-      right -= pw + 10;
-    }
-    drawLabel(row, d->dest, DEST_X, BASE, right - DEST_X, C_WHITE);
+    row.pushSprite(0, rowY(r));
+  };
+  if (flapFont && d && (strcmp(prevDest[r], d->dest) || strcmp(prevMin[r], buf))) {
+    render(1); flapPause();
+    render(2); flapPause();
   }
-  row.pushSprite(0, rowY(r));
+  render(0);
+  strlcpy(prevDest[r], d ? d->dest : "", sizeof prevDest[r]);
+  strlcpy(prevMin[r], buf, sizeof prevMin[r]);
 }
 
 void drawStatus(const char* msg) {
@@ -1296,7 +1412,6 @@ void loop() {
   handleButton();
   watchdog();
 
-  static int lastSec = -1;
   static bool updateShown = false;
   if (updating) {
     if (!updateShown) { updateShown = true; drawStatus("Update wird installiert..."); }
@@ -1311,11 +1426,15 @@ void loop() {
     lastSec = -1;
     invalidate();
   }
+  if (!tick()) delay(5);
+}
 
+// Einmal pro Sekunde: Nachtmodus, Abfahrten sammeln und zeichnen
+bool tick() {
   time_t now = time(nullptr);
   struct tm t;
   localtime_r(&now, &t);
-  if (t.tm_sec == lastSec) { delay(5); return; }
+  if (t.tm_sec == lastSec) return false;
   lastSec = t.tm_sec;
   bool blink = !(t.tm_sec & 1);
 
@@ -1335,7 +1454,7 @@ void loop() {
     }
     invalidate();
   }
-  if (dark) return;
+  if (dark) return true;
 
   Departure feed[MAX_ST * MAX_DEPS];
   int n = 0, notFound = 0, netErr = 0;
@@ -1378,4 +1497,5 @@ void loop() {
   }
   for (int r = shown; r < MAX_ROWS; r++) drawRow(r, nullptr, now, blink);
   fillBottom();
+  return true;
 }
