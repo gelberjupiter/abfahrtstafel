@@ -15,6 +15,7 @@
 #include <time.h>
 #include "SourceSansBold26.h"
 #include "SourceSansBold19.h"
+#include "OswaldFlap24.h"
 #include "web.h"
 
 static const char* HOSTNAME = "abfahrtstafel";
@@ -259,7 +260,8 @@ void dotGrid(TFT_eSPI& g, int h, int yOff, uint16_t bg) {
 
 void setFont(TFT_eSPI& g, int size) {
   if (size == UI2) g.setTextFont(2);
-  else g.setFreeFont(size == BIG ? &SourceSansBold26 : &SourceSansBold19);
+  else if (size == BIG) g.setFreeFont(flapFont ? &OswaldFlap24 : &SourceSansBold26);
+  else g.setFreeFont(&SourceSansBold19);
 }
 
 int txtWidth(TFT_eSPI& g, const char* s, int size) {
@@ -884,6 +886,24 @@ void flapChars(TFT_eSPI& g, const char* s, const char* old, int x, int top, int 
   }
 }
 
+// Abfahrt jetzt: Piktogramm (Bus/Tram/Zug) auf eigenem Blatt
+static const int FLAP_ICON_W = 2 * FLAP_P - 2;
+void flapIcon(TFT_eSPI& g, int x, int top, const char* cat, uint16_t color, int stage) {
+  const int half = FLAP_H / 2, w = FLAP_ICON_W;
+  const uint16_t tc = flapColor(), lo = tft.alphaBlend(190, tc, TFT_BLACK);
+  g.fillRect(x, top, w, half, tc);
+  g.fillRect(x, top + half, w, FLAP_H - half, lo);
+  const uint16_t* bm = isBus(cat) ? PIX_BUS : isTram(cat) ? PIX_TRAM : PIX_TRAIN;
+  const int x0 = x + (w - 18) / 2, y0 = top + (FLAP_H - 16) / 2;
+  g.setViewport(x, top, w, stage ? half : FLAP_H, false);
+  for (int ry = 0; ry < 8; ry++)
+    for (int cx = 0; cx < 9; cx++)
+      if (bm[ry] & (1 << (8 - cx))) g.fillRect(x0 + cx * 2, y0 + ry * 2, 2, 2, color);
+  g.resetViewport();
+  if (stage == 2) g.fillRect(x, top + half, w, half / 2, tc);
+  g.drawFastHLine(x, top + half, w, TFT_BLACK);
+}
+
 inline void flapPause() { delay(45); }
 
 void drawTitleBar(const char* title) {
@@ -971,7 +991,7 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       if (m < 60) snprintf(buf, sizeof buf, "%ld'", m);
       else { struct tm t; localtime_r(&d->when, &t); strftime(buf, sizeof buf, "%H:%M", &t); }
     }
-    sig.str(d->cat).str(d->line).str(d->dest).str(d->platform).str(buf).val(c).val(leaving && blink);
+    sig.str(d->cat).str(d->line).str(d->dest).str(d->platform).str(buf).val(c).val(leaving && (blink || flapFont));
   }
   if (sig.get() == rowSig[r]) return;
   rowSig[r] = sig.get();
@@ -982,7 +1002,10 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       int bw = drawBadge(row, *d, 6, ROW_H / 2);
       if (flapFont) row.drawFastHLine(6, ROW_H / 2, bw, TFT_BLACK);
       int minW;
-      if (leaving) {
+      if (leaving && flapFont) {
+        minW = FLAP_ICON_W;
+        flapIcon(row, MIN_RIGHT - minW, 3, d->cat, c, prevMin[r][0] ? stage : 0);
+      } else if (leaving) {
         minW = pixelFont ? PIX_VEH_W : VEH_W;
         if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
                              : drawVehicle(row, MIN_RIGHT, ROW_H / 2, c);

@@ -33,3 +33,7 @@ Die Tafel prüft beim Start und alle 6 Stunden, ob es ein neueres Release gibt, 
 - Fällt ein Fahrplan-Server aus, wird automatisch der andere verwendet; die Tafel zeigt den Grund an.
 - WLAN weg: neuer Versuch alle 30 s; nach 10 min Einrichtungsmodus, der das alte WLAN jede Minute weiter versucht.
 - Hängt etwas länger (kein Abruf, 1 h kein Server), startet die Tafel still neu (nicht nachts).
+
+## Schriften
+
+Source Sans 3 und Oswald (Fallblatt), beide unter der SIL Open Font License 1.1 (siehe `fonts/`).
