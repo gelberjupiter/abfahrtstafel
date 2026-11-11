@@ -539,7 +539,10 @@ void checkUpdate() {
   filter["tag_name"] = true;
   filter["assets"][0]["name"] = true;
   filter["assets"][0]["browser_download_url"] = true;
-  if (!getJson(String("https://api.github.com/repos/") + GITHUB_REPO + "/releases/latest", doc, filter)) return;
+  bool ok = getJson(String("https://api.github.com/repos/") + GITHUB_REPO + "/releases/latest", doc, filter);
+  http.end();
+  tls.stop();  // Verbindung zu GitHub schliessen, sonst gehen Fahrplan-Abfragen an den falschen Server
+  if (!ok) return;
   const char* tag = doc["tag_name"] | "";
   if (*tag != 'v' || atoi(tag + 1) <= FW_BUILD) return;
   const char* url = nullptr;
@@ -547,8 +550,6 @@ void checkUpdate() {
     if (!strcmp(a["name"] | "", "firmware.bin")) url = a["browser_download_url"];
   if (!url) return;
 
-  http.end();
-  tls.stop();
   updating = true;
   delay(1500);  // Hinweis auf dem Display anzeigen lassen
   WiFiClientSecure c;
