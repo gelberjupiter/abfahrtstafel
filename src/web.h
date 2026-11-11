@@ -41,22 +41,29 @@ details{margin-top:12px}summary{cursor:pointer;color:#1a2ab0;font-weight:600}
 .bar{position:sticky;bottom:0;padding:8px 0 12px;background:linear-gradient(#f2f3f800,#f2f3f8 30%)}
 .two{display:flex;gap:8px}.two button{margin:0;flex:1}
 button.warn{background:#c00;color:#fff}
+.row input{flex:1;min-width:0}
+.note{font-weight:600;margin:12px 0 0;min-height:1.4em}.bad{color:#c00}.good{color:#1a2ab0}
+.stw{color:#c00;font-size:14px;font-weight:600;margin:6px 0 0}
+#warn{background:#fff4d6;color:#7a5200;font-weight:600}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #1a2ab0;border-right-color:transparent;border-radius:50%;animation:r .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes r{to{transform:rotate(1turn)}}
 </style></head><body><header><h1>Abfahrtstafel</h1></header><main>)HTML";
 
-// ---------- Einrichtung (eigenes WLAN der Tafel) ----------
+// ---------- Einrichtung (eigenes WLAN der Tafel, öffnet sich am Handy von selbst) ----------
 const char PORTAL_HTML[] PROGMEM = R"HTML(
-<section><h2>WLAN einrichten</h2>
-<form method="post" action="/save">
-<label for="s">WLAN</label><select id="s" name="ssid"><option>Suche…</option></select>
-<input id="o" name="other" placeholder="Name des WLANs" style="display:none;margin-top:8px">
+<section id="f"><h2>Mit deinem WLAN verbinden</h2>
+<label for="s">WLAN</label><select id="s"><option>Suche…</option></select>
+<input id="o" placeholder="Name des WLANs" autocapitalize="off" autocorrect="off" spellcheck="false" style="display:none;margin-top:8px">
 <button type="button" class="sec" id="r">Neu suchen</button>
-<label for="p">Passwort</label><input id="p" name="pass" type="password" autocomplete="off">
-<label class="chk"><input type="checkbox" onclick="p.type=this.checked?'text':'password'"> Passwort anzeigen</label>
-<button>Verbinden</button>
-</form></section>
-<p class="muted">Danach verbindet sich die Tafel mit deinem WLAN. Stationen und Farben stellst du anschliessend über den QR-Code auf der Tafel ein.</p>
+<label for="p">Passwort</label>
+<div class="row"><input id="p" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><button type="button" class="sec" id="e">Zeigen</button></div>
+<button type="button" id="go">Verbinden</button>
+<p id="m" class="note"></p></section>
+<p class="muted" id="hint">Haltestellen und Farben stellst du danach über den Code auf der Tafel ein.</p>
 <script>
-const s=document.getElementById('s'),o=document.getElementById('o');
+const $=i=>document.getElementById(i),s=$('s'),o=$('o'),p=$('p'),m=$('m'),go=$('go');
+const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const sleep=t=>new Promise(r=>setTimeout(r,t));
+function say(t,cls){m.innerHTML=t;m.className='note '+(cls||'bad')}
 async function load(re){
   s.innerHTML='<option>Suche…</option>';
   let l=[];try{l=await(await fetch('/api/networks'+(re?'?rescan=1':''))).json()}catch(e){}
@@ -66,18 +73,34 @@ async function load(re){
   s.onchange();
 }
 s.onchange=()=>o.style.display=s.value=='__other'?'block':'none';
-document.getElementById('r').onclick=()=>load(1);
+$('r').onclick=()=>load(1);
+$('e').onclick=()=>{const show=p.type=='password';p.type=show?'text':'password';$('e').textContent=show?'Verbergen':'Zeigen'};
+p.onkeydown=e=>{if(e.key=='Enter')go.click()};
+go.onclick=async()=>{
+  const ssid=s.value=='__other'?o.value.trim():s.value;
+  if(!ssid||ssid=='Suche…'){say('Bitte zuerst dein WLAN auswählen.');return}
+  go.disabled=true;say('<span class="spin"></span>Verbinde mit «'+esc(ssid)+'»…','good');
+  try{const r=await fetch('/api/connect',{method:'POST',body:new URLSearchParams({ssid,pass:p.value})});if(!r.ok)throw 0}
+  catch(e){say('Tafel antwortet nicht. Ist das Handy noch im WLAN «Abfahrtstafel»?');go.disabled=false;return}
+  for(let miss=0;;){
+    await sleep(1000);
+    let st;try{st=(await(await fetch('/api/state',{cache:'no-store'})).json()).s;miss=0}
+    catch(e){if(++miss>25){say('Verbindung zur Tafel unterbrochen. Schau auf die Tafel: Steht dort «Verbunden», hat alles geklappt.');break}continue}
+    if(st==1)continue;
+    if(st==2){$('f').innerHTML='<h2>Verbunden ✓</h2><p>Die Tafel ist jetzt mit «'+esc(ssid)+'» verbunden und startet neu.</p><p class="muted">Dieses Fenster schliesst sich gleich von selbst. Danach den Code auf der Tafel scannen, um Haltestellen einzustellen.</p>';$('hint').hidden=true;return}
+    if(st==3){say('Passwort falsch. Bitte nochmals eingeben, Gross- und Kleinschreibung beachten.');p.focus();p.select()}
+    else if(st==4)say('«'+esc(ssid)+'» nicht gefunden. Die Tafel braucht ein 2,4-GHz-WLAN in der Nähe.');
+    else say('Verbindung hat nicht geklappt. Bitte nochmals versuchen.');
+    break;
+  }
+  go.disabled=false;
+};
 load(0);
 </script></main></body></html>)HTML";
 
-const char SAVED_HTML[] PROGMEM = R"HTML(
-<section><h2>Gespeichert</h2>
-<p>Die Tafel startet neu und verbindet sich mit deinem WLAN.</p>
-<p class="muted">Du kannst dieses Fenster schliessen. Klappt die Verbindung nicht, erscheint wieder der Einrichtungs-Code.</p>
-</section></main></body></html>)HTML";
-
 // ---------- Einstellungen (im Heim-WLAN) ----------
 const char CONFIG_HTML[] PROGMEM = R"HTML(
+<section id="warn" hidden></section>
 <section><h2>Adresse dieser Seite</h2>
 <div class="addr"><a id="url"></a><button type="button" class="sec" id="cp">Kopieren</button></div></section>
 
@@ -106,7 +129,20 @@ const char CONFIG_HTML[] PROGMEM = R"HTML(
 <script>
 const $=i=>document.getElementById(i);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const API="https://transport.opendata.ch/v1/";
+const SCH="https://search.ch/timetable/api/",OD="https://transport.opendata.ch/v1/",enc=encodeURIComponent;
+async function getJ(u,ms){const c=new AbortController(),t=setTimeout(()=>c.abort(),ms||7000);
+  try{const r=await fetch(u,{signal:c.signal,cache:'no-store'});if(!r.ok)throw r.status;return await r.json()}finally{clearTimeout(t)}}
+// Fahrplan-Daten: zuerst search.ch, sonst transport.opendata.ch
+async function findNames(q){
+  try{return(await getJ(SCH+'completion.json?term='+enc(q))).filter(x=>!/adr|poi/.test(x.iconclass||'')).map(x=>x.label.trim())}catch(e){}
+  try{return((await getJ(OD+'locations?type=station&fields[]=stations/name&query='+enc(q))).stations||[]).map(s=>s.name)}catch(e){}
+  return[]}
+async function findLines(s){
+  try{const r=await getJ(SCH+'stationboard.json?limit=60&stop='+enc(s));
+    if(r.connections)return r.connections.map(e=>({c:e['*G']||'',n:e['*L']||e.line||''}));if(r.messages)return null}catch(e){}
+  try{const r=await getJ(OD+'stationboard?limit=60&fields[]=station/name&fields[]=stationboard/number&fields[]=stationboard/category&station='+enc(s));
+    if(r.station&&r.station.name)return(r.stationboard||[]).map(e=>({c:e.category||'',n:e.number||''}));return null}catch(e){}
+  return false}
 const PLAIN=['T','B','NFT','NFB','TRAM','BUS',''];
 const PRESETS={
   'SBB-Blau':{bg:'#1a2ab0',hdr:'#101878',line:'#4055d8',text:'#ffffff',delay:'#ffde15',muted:'#b4b8e6',go:'#ff4a3d'},
@@ -123,10 +159,10 @@ function suggest(inp){
   let tm;
   inp.addEventListener('input',()=>{
     clearTimeout(tm);const q=inp.value.trim();if(q.length<2)return;
-    tm=setTimeout(async()=>{try{
-      const r=await(await fetch(API+'locations?type=station&fields[]=stations/name&query='+encodeURIComponent(q))).json();
-      $('dl').innerHTML=(r.stations||[]).map(s=>s.name).filter(Boolean).slice(0,8).map(n=>'<option value="'+esc(n)+'">').join('');
-    }catch(e){}},400);
+    tm=setTimeout(async()=>{
+      const l=await findNames(q);
+      $('dl').innerHTML=l.filter(Boolean).slice(0,8).map(n=>'<option value="'+esc(n)+'">').join('');
+    },350);
   });
 }
 
@@ -135,9 +171,10 @@ function addSt(st){
   d.innerHTML='<div class="row"><div class="seg"><button type="button" data-t="stop">Tram &amp; Bus</button><button type="button" data-t="train">Zug</button></div><button type="button" class="sec x">✕</button></div>'
    +'<div class="p-stop"><input class="nm" list="dl" placeholder="Haltestelle" autocomplete="off"><div class="lines"></div></div>'
    +'<div class="p-train"><input class="fr" list="dl" placeholder="Von (z. B. Zürich HB)" autocomplete="off"><input class="to" list="dl" placeholder="Nach (z. B. Winterthur)" autocomplete="off"></div>'
-   +'<div class="walk">Fussweg <input class="wk" type="number" min="0" max="60" inputmode="numeric"> min</div>';
+   +'<div class="walk">Fussweg <input class="wk" type="number" min="0" max="60" inputmode="numeric"> min</div><p class="stw" hidden></p>';
   const q=c=>d.querySelector(c);
-  const nm=q('.nm'),ln=q('.lines'),fr=q('.fr'),to=q('.to'),wk=q('.wk');
+  const nm=q('.nm'),ln=q('.lines'),fr=q('.fr'),to=q('.to'),wk=q('.wk'),w=q('.stw');
+  d.warn=t=>{w.textContent=t?'⚠ '+t:'';w.hidden=!t};
   let type=st.type==='train'?'train':'stop';
   if(type==='train'){fr.value=st.name||'';to.value=st.to||''}else nm.value=st.name||'';
   wk.value=st.walk||0;
@@ -151,25 +188,26 @@ function addSt(st){
   d.get=()=>type==='train'
     ?{type,name:fr.value.trim(),to:to.value.trim(),walk:+wk.value||0}
     :{type,name:nm.value.trim(),lines:[...d.sel].join(','),walk:+wk.value||0};
+  [nm,fr,to].forEach(i=>i.addEventListener('input',()=>d.warn('')));
   let last=nm.value.trim();
   nm.onchange=()=>{if(nm.value.trim()!==last){last=nm.value.trim();d.sel.clear();lines()}};
   let seq=0;
   async function lines(){
     const s=nm.value.trim(),my=++seq;if(!s){ln.innerHTML='';return}
     ln.innerHTML='<span class="muted">Linien werden geladen…</span>';
-    let l=[];try{
-      const r=await(await fetch(API+'stationboard?limit=60&fields[]=stationboard/number&fields[]=stationboard/category&station='+encodeURIComponent(s))).json();
-      for(const e of r.stationboard||[])if(e.number&&!l.some(x=>x.n===e.number))l.push({c:e.category||'',n:e.number});
-    }catch(e){}
+    const r=await findLines(s);
     if(my!==seq)return;
+    const l=[];
+    for(const e of r||[])if(e.n&&!l.some(x=>x.n===e.n))l.push(e);
     for(const x of d.sel)if(!l.some(y=>y.n===x))l.push({c:'',n:x});
-    if(!l.length){ln.innerHTML='<span class="muted">Nichts gefunden</span>';return}
+    if(r===null){ln.innerHTML='';d.warn('Nicht gefunden. Bitte den Namen aus der Vorschlagsliste wählen.');return}
+    if(!l.length){ln.innerHTML='<span class="muted">'+(r===false?'Linien können gerade nicht geladen werden. Speichern geht trotzdem (zeigt alle Linien).':'Keine Linien gefunden')+'</span>';return}
     l.sort((a,b)=>(parseInt(a.n)||999)-(parseInt(b.n)||999)||a.n.localeCompare(b.n));
     ln.innerHTML='';
     for(const x of l){
       const b=document.createElement('button');b.type='button';
       b.className='chip'+(d.sel.has(x.n)?' on':'');
-      b.textContent=(PLAIN.includes(x.c)?'':x.c)+x.n;
+      b.textContent=(PLAIN.includes(x.c)?'':x.c+(x.c.length>1?' ':''))+x.n;
       b.onclick=()=>{d.sel.has(x.n)?d.sel.delete(x.n):d.sel.add(x.n);b.classList.toggle('on')};
       ln.appendChild(b);
     }
@@ -206,11 +244,31 @@ confirmBtn($('fr'),'Alles löschen?','/api/factoryreset','Alles gelöscht. Die T
 
 $('non').onchange=()=>$('nt').style.display=$('non').checked?'':'none';
 
+// Zustand der Tafel: Warnung oben und pro Eintrag
+let SAVED=[];
+function showStatus(S){
+  if(!S)return;
+  SAVED.forEach((d,i)=>d.warn(S.st[i]==2?'Nicht gefunden. Bitte den Namen aus der Vorschlagsliste wählen.':''));
+  const w=$('warn');
+  w.textContent=!S.wifi?'⚠ Die Tafel hat gerade kein WLAN und verbindet sich neu.'
+    :S.st.length&&S.st.every(x=>x==3)?'⚠ Der Fahrplan-Server ist gerade nicht erreichbar. Die Tafel versucht es automatisch weiter.':'';
+  w.hidden=!w.textContent;
+}
+async function poll(){
+  for(let i=0;i<15;i++){
+    await new Promise(r=>setTimeout(r,1500));
+    let S;try{S=await getJ('/api/status',4000)}catch(e){continue}
+    if(!S.st.includes(0)||i==14){showStatus(S);return S}
+  }
+}
+setInterval(async()=>{try{showStatus(await getJ('/api/status',4000))}catch(e){}},30000);
+
 async function load(){
-  D=await(await fetch('/api/config')).json();
-  const u='http://'+D.ip+'/';$('url').href=u;$('url').textContent=u;
+  D=await getJ('/api/config',8000);
+  const u='http://'+D.host+'/';$('url').href=u;$('url').textContent=u;
   $('title').value=D.title;$('ver').textContent=D.version?'Version '+D.version:'Version: lokal gebaut';
   $('sts').innerHTML='';D.stations.forEach(addSt);if(!D.stations.length)addSt({});
+  SAVED=[...$('sts').children];showStatus(D.status);
   $('non').checked=D.night.on;$('nfrom').value=D.night.from;$('nto').value=D.night.to;$('non').onchange();
   setCols(D.colors);setFont(D.font||"sans");
 }
@@ -218,17 +276,27 @@ $('cp').onclick=async()=>{const t=$('url').href;
   try{await navigator.clipboard.writeText(t)}catch(e){const i=document.createElement('textarea');i.value=t;document.body.append(i);i.select();document.execCommand('copy');i.remove()}
   $('cp').textContent='Kopiert ✓';setTimeout(()=>$('cp').textContent='Kopieren',1500)};
 $('add').onclick=()=>addSt({});
+let msgT;
+function msg(t,keep){$('msg').textContent=t;clearTimeout(msgT);if(!keep)msgT=setTimeout(()=>$('msg').textContent='',4000)}
 $('save').onclick=async()=>{
-  const b={title:$('title').value,
-    stations:[...$('sts').children].map(d=>d.get()).filter(s=>s.name&&(s.type!=='train'||s.to)),
+  const els=[],stations=[];let bad=false;
+  for(const d of $('sts').children){const s=d.get();d.warn('');
+    if(s.type==='train'&&(s.name||s.to)&&!(s.name&&s.to)){d.warn(s.name?'Bitte ein Ziel eingeben.':'Bitte einen Start eingeben.');bad=true}
+    else if(s.name){els.push(d);stations.push(s)}}
+  if(bad){msg('Bitte die markierten Felder ergänzen.');return}
+  const b={title:$('title').value,stations,
     night:{on:$('non').checked,from:$('nfrom').value||'00:00',to:$('nto').value||'06:00'},
     font,colors:colors()};
-  $('msg').textContent='Speichere…';
+  $('save').disabled=true;msg('Speichere…',1);
   try{
-    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
-    $('msg').textContent=r.ok?'Gespeichert ✓':'Fehler beim Speichern';
-  }catch(e){$('msg').textContent='Tafel nicht erreichbar'}
-  setTimeout(()=>$('msg').textContent='',3000);
+    const c=new AbortController(),t=setTimeout(()=>c.abort(),8000);
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b),signal:c.signal});
+    clearTimeout(t);if(!r.ok)throw 0;
+    SAVED=els;msg('Gespeichert ✓ Prüfe Haltestellen…',1);
+    const S=await poll();
+    msg(!S?'Gespeichert ✓':S.st.includes(2)?'Gespeichert, aber eine Haltestelle wurde nicht gefunden.':S.st.length&&S.st.every(x=>x==3)?'Gespeichert ✓ Fahrplan gerade nicht erreichbar.':'Gespeichert ✓ Tafel ist aktuell.');
+  }catch(e){msg('Speichern fehlgeschlagen. Ist das Handy im selben WLAN wie die Tafel?')}
+  $('save').disabled=false;
 };
-load().catch(()=>{document.querySelector('main').innerHTML='<section><p>Tafel nicht erreichbar. Ist das Handy im selben WLAN?</p></section>'});
+load().catch(()=>{document.querySelector('main').innerHTML='<section><h2>Tafel nicht erreichbar</h2><p>Ist das Handy im selben WLAN wie die Tafel? Dann Seite neu laden.</p><button onclick="location.reload()">Neu laden</button></section>'});
 </script></main></body></html>)HTML";

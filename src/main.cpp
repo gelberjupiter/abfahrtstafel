@@ -7,6 +7,7 @@
 #include <HTTPUpdate.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
@@ -18,11 +19,11 @@
 
 static const char* HOSTNAME = "abfahrtstafel";
 static const int BOOT_PIN = 0;
-static const uint32_t FETCH_INTERVAL_MS = 30000;
+static const char* AP_SSID = "Abfahrtstafel";
 static const uint32_t WIFI_TIMEOUT_MS = 30000;
-static const uint32_t PORTAL_RETRY_MS = 5 * 60000;
 static const char* TZ_CH = "CET-1CEST,M3.5.0,M10.5.0/3";
-static const char* API = "https://transport.opendata.ch/v1/";
+static const char* SCH = "https://search.ch/timetable/api/";
+static const char* OD = "https://transport.opendata.ch/v1/";
 static const uint32_t UPDATE_INTERVAL_MS = 6UL * 3600 * 1000;
 #ifndef FW_BUILD
 #define FW_BUILD 0
@@ -93,6 +94,19 @@ DNSServer dns;
 TaskHandle_t fetchHandle = nullptr;
 uint32_t infoUntil = 0, wakeUntil = 0;
 volatile bool updating = false;
+volatile uint32_t fetchAlive = 0, serverSeen = 0;
+
+// Neustart ohne QR-Bildschirm (z. B. nach WLAN-Ausfall), überlebt ESP.restart()
+static const uint32_t QUIET = 0x51E7B007;
+RTC_NOINIT_ATTR uint32_t quietMagic;
+[[noreturn]] void quietRestart() {
+  quietMagic = QUIET;
+  ESP.restart();
+  for (;;) {}
+}
+
+// Abfrage-Ergebnis je Eintrag (auch für die Webseite)
+enum Res : uint8_t { RES_WAIT, RES_OK, RES_NOTFOUND, RES_NET };
 
 struct Departure {
   char cat[6], line[8], dest[48], platform[8];
@@ -102,6 +116,7 @@ struct Departure {
 Departure deps[MAX_ST][MAX_DEPS];
 int depCount[MAX_ST];
 time_t lastOk[MAX_ST];
+uint8_t stStatus[MAX_ST];
 
 // Bildspeicher-Abgleich: nur geänderte Zeilen werden gezeichnet und übertragen
 uint32_t rowSig[MAX_ROWS], hdrSig;
@@ -371,9 +386,22 @@ void configToJson(JsonDocument& d, bool forWeb) {
   }
   if (forWeb) {
     d["ssid"] = WiFi.SSID();
-    d["ip"] = WiFi.localIP().toString();
+    d["host"] = String(HOSTNAME) + ".local";
     d["version"] = FW_BUILD;
   }
+}
+
+void statusJson(JsonObject d) {
+  time_t now = time(nullptr), newest = 0;
+  JsonArray a = d["st"].to<JsonArray>();
+  xSemaphoreTake(depMutex, portMAX_DELAY);
+  for (int s = 0; s < cfgNumSt; s++) {
+    a.add(stStatus[s]);
+    if (lastOk[s] > newest) newest = lastOk[s];
+  }
+  xSemaphoreGive(depMutex);
+  d["age"] = newest ? (long)(now - newest) : -1L;
+  d["wifi"] = WiFi.status() == WL_CONNECTED;
 }
 
 void loadConfig() {
@@ -398,23 +426,39 @@ void saveConfig() {
 }
 
 // ===================== Abfahrten holen =====================
-// Eine TLS-Verbindung für alle Abfragen, wird wiederverwendet solange der Server sie offen hält
+// Zwei Quellen: search.ch (Haupt) und transport.opendata.ch (Ersatz). Fällt eine aus, wird sie
+// 2 Minuten übersprungen. Antworten werden direkt aus dem Datenstrom gefiltert (wenig RAM).
 WiFiClientSecure tls;
 HTTPClient http;
+uint32_t srcDownUntil[2];
 
-bool getJson(const String& url, JsonDocument& doc, JsonDocument& filter) {
+int getJson(const String& url, JsonDocument& doc, JsonDocument& filter) {
   for (int attempt = 0; attempt < 2; attempt++) {
+    http.useHTTP10(true);
     if (!http.begin(tls, url)) continue;
     int code = http.GET();
     if (code == HTTP_CODE_OK) {
-      String body = http.getString();
+      DeserializationError e = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
       http.end();
-      return !deserializeJson(doc, body, DeserializationOption::Filter(filter));
+      if (!e) return code;
+    } else {
+      http.end();
+      if (code >= 400 && code < 500) return code;
     }
-    http.end();
-    tls.stop();
   }
-  return false;
+  return -1;
+}
+
+inline Res httpRes(int code) { return code == 400 || code == 404 ? RES_NOTFOUND : RES_NET; }  // 429 = Kontingent
+
+time_t parseTime(const char* s) {
+  struct tm t = {};
+  if (sscanf(s, "%d-%d-%d %d:%d:%d", &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec) != 6)
+    return 0;
+  t.tm_year -= 1900;
+  t.tm_mon -= 1;
+  t.tm_isdst = -1;
+  return mktime(&t);
 }
 
 void storeDepartures(int s, Departure* tmp, int n, uint32_t gen) {
@@ -438,12 +482,84 @@ String cityPrefix(const char* official) {
   return c ? String(official).substring(0, c - official + 2) : String();
 }
 
-void copyDest(Departure& d, const char* to, const String& prefix) {
+// Abfahrt eintragen; false wenn schon vorbei
+bool setDep(Departure& d, const char* cat, const char* line, const char* to, const String& prefix,
+            const char* platform, time_t ts, int dl, int walk, time_t now) {
+  if (!ts || ts + dl * 60 < now - 30) return false;
+  strlcpy(d.cat, cat, sizeof d.cat);
+  strlcpy(d.line, line, sizeof d.line);
   if (prefix.length() && !strncmp(to, prefix.c_str(), prefix.length())) to += prefix.length();
   strlcpy(d.dest, to, sizeof d.dest);
+  strlcpy(d.platform, platform, sizeof d.platform);
+  d.when = ts + dl * 60;
+  d.delay = dl;
+  d.walk = walk * 60;
+  return true;
 }
 
-bool fetchTrain(int s, const Station& st, uint32_t gen) {
+// --- search.ch ---
+Res schStop(int s, const Station& st, uint32_t gen) {
+  JsonDocument filter, doc;
+  JsonObject c = filter["connections"][0].to<JsonObject>();
+  for (const char* k : {"time", "*G", "*L", "line", "dep_delay"}) c[k] = true;
+  c["terminal"]["name"] = true;
+  filter["stop"]["name"] = true;
+  filter["messages"] = true;
+  int code = getJson(String(SCH) + "stationboard.json?limit=30&show_delays=1&stop=" + urlEncode(st.query.c_str()),
+                     doc, filter);
+  if (code != HTTP_CODE_OK) return httpRes(code);
+  if (!doc["connections"].is<JsonArray>() && doc["messages"].is<JsonArray>()) return RES_NOTFOUND;
+
+  String prefix = cityPrefix(doc["stop"]["name"] | st.query.c_str());
+  Departure tmp[16];
+  int n = 0;
+  time_t now = time(nullptr);
+  for (JsonObject e : doc["connections"].as<JsonArray>()) {
+    if (n >= 16) break;
+    const char* dl = e["dep_delay"] | "";
+    if (*dl == 'X') continue;  // ausgefallen
+    const char* num = e["*L"] | (e["line"] | "");
+    if (!lineAllowed(st.lines.c_str(), num)) continue;
+    if (setDep(tmp[n], e["*G"] | "", num, e["terminal"]["name"] | "", prefix, "",
+               parseTime(e["time"] | ""), atoi(dl), st.walk, now)) n++;
+  }
+  storeDepartures(s, tmp, n, gen);
+  return RES_OK;
+}
+
+Res schTrain(int s, const Station& st, uint32_t gen) {
+  JsonDocument filter, doc;
+  JsonObject c = filter["connections"][0].to<JsonObject>();
+  for (const char* k : {"from", "to", "departure", "dep_delay"}) c[k] = true;
+  JsonObject l = c["legs"][0].to<JsonObject>();
+  for (const char* k : {"type", "*G", "*L", "track"}) l[k] = true;
+  filter["messages"] = true;
+  int code = getJson(String(SCH) + "route.json?num=16&show_delays=1&from=" + urlEncode(st.query.c_str()) +
+                     "&to=" + urlEncode(st.to.c_str()), doc, filter);
+  if (code != HTTP_CODE_OK) return httpRes(code);
+  if (!doc["connections"].is<JsonArray>() && doc["messages"].is<JsonArray>()) return RES_NOTFOUND;
+
+  Departure tmp[16];
+  int n = 0;
+  time_t now = time(nullptr);
+  for (JsonObject e : doc["connections"].as<JsonArray>()) {
+    if (n >= 16) break;
+    JsonObject leg;
+    int rides = 0;
+    for (JsonObject lg : e["legs"].as<JsonArray>())
+      if (lg["type"].is<const char*>()) { rides++; leg = lg; }
+    if (rides != 1 || !strcmp(leg["type"] | "", "walk")) continue;  // nur direkte Züge
+    const char* dl = e["dep_delay"] | "";
+    if (*dl == 'X') continue;
+    if (setDep(tmp[n], leg["*G"] | "", leg["*L"] | "", e["to"] | st.to.c_str(), cityPrefix(e["from"] | ""),
+               leg["track"] | "", parseTime(e["departure"] | ""), atoi(dl), st.walk, now)) n++;
+  }
+  storeDepartures(s, tmp, n, gen);
+  return RES_OK;
+}
+
+// --- transport.opendata.ch ---
+Res odTrain(int s, const Station& st, uint32_t gen) {
   JsonDocument filter, doc;
   JsonObject c = filter["connections"][0].to<JsonObject>();
   c["from"]["departureTimestamp"] = true;
@@ -455,42 +571,32 @@ bool fetchTrain(int s, const Station& st, uint32_t gen) {
   c["sections"][0]["journey"]["category"] = true;
   c["sections"][0]["journey"]["number"] = true;
 
-  String url = String(API) + "connections?direct=1&limit=16"
+  int code = getJson(String(OD) + "connections?direct=1&limit=16"
       "&fields[]=connections/from/departureTimestamp&fields[]=connections/from/delay"
       "&fields[]=connections/from/platform&fields[]=connections/from/station/name"
       "&fields[]=connections/to/station/name&fields[]=connections/products"
       "&fields[]=connections/sections/journey/category&fields[]=connections/sections/journey/number"
-      "&from=" + urlEncode(st.query.c_str()) + "&to=" + urlEncode(st.to.c_str());
-  if (!getJson(url, doc, filter)) return false;
+      "&from=" + urlEncode(st.query.c_str()) + "&to=" + urlEncode(st.to.c_str()), doc, filter);
+  if (code != HTTP_CODE_OK) return httpRes(code);
 
   Departure tmp[16];
   int n = 0;
   time_t now = time(nullptr);
   for (JsonObject e : doc["connections"].as<JsonArray>()) {
     if (n >= 16) break;
-    if (e["products"].size() != 1) continue;  // nur direkte Züge
-    long ts = e["from"]["departureTimestamp"] | 0L;
-    int dl = e["from"]["delay"] | 0;
-    if (!ts || ts + dl * 60 < now - 30) continue;
-
+    if (e["products"].size() != 1) continue;
     JsonObject jn;
     for (JsonObject sec : e["sections"].as<JsonArray>())
       if (sec["journey"].is<JsonObject>()) { jn = sec["journey"]; break; }
-
-    Departure& d = tmp[n++];
-    strlcpy(d.cat, jn["category"] | "", sizeof d.cat);
-    strlcpy(d.line, jn["number"] | "", sizeof d.line);
-    copyDest(d, e["to"]["station"]["name"] | st.to.c_str(), cityPrefix(e["from"]["station"]["name"] | ""));
-    strlcpy(d.platform, e["from"]["platform"] | "", sizeof d.platform);
-    d.when = ts + dl * 60;
-    d.delay = dl;
-    d.walk = st.walk * 60;
+    if (setDep(tmp[n], jn["category"] | "", jn["number"] | "", e["to"]["station"]["name"] | st.to.c_str(),
+               cityPrefix(e["from"]["station"]["name"] | ""), e["from"]["platform"] | "",
+               e["from"]["departureTimestamp"] | 0L, e["from"]["delay"] | 0, st.walk, now)) n++;
   }
   storeDepartures(s, tmp, n, gen);
-  return true;
+  return RES_OK;
 }
 
-bool fetchStop(int s, const Station& st, uint32_t gen) {
+Res odStop(int s, const Station& st, uint32_t gen) {
   JsonDocument filter, doc;
   JsonObject b = filter["stationboard"][0].to<JsonObject>();
   b["category"] = true;
@@ -500,11 +606,12 @@ bool fetchStop(int s, const Station& st, uint32_t gen) {
   b["stop"]["delay"] = true;
   filter["station"]["name"] = true;
 
-  String url = String(API) + "stationboard?limit=30&fields[]=station/name"
+  int code = getJson(String(OD) + "stationboard?limit=30&fields[]=station/name"
       "&fields[]=stationboard/category&fields[]=stationboard/number&fields[]=stationboard/to"
       "&fields[]=stationboard/stop/departureTimestamp&fields[]=stationboard/stop/delay&station=" +
-      urlEncode(st.query.c_str());
-  if (!getJson(url, doc, filter)) return false;
+      urlEncode(st.query.c_str()), doc, filter);
+  if (code != HTTP_CODE_OK) return httpRes(code);
+  if (!doc["station"]["name"].is<const char*>()) return RES_NOTFOUND;
 
   String prefix = cityPrefix(doc["station"]["name"] | st.query.c_str());
   Departure tmp[16];
@@ -512,29 +619,41 @@ bool fetchStop(int s, const Station& st, uint32_t gen) {
   time_t now = time(nullptr);
   for (JsonObject e : doc["stationboard"].as<JsonArray>()) {
     if (n >= 16) break;
-    long ts = e["stop"]["departureTimestamp"] | 0L;
-    int dl = e["stop"]["delay"] | 0;
-    if (!ts || ts + dl * 60 < now - 30) continue;
     const char* num = e["number"] | "";
     if (!lineAllowed(st.lines.c_str(), num)) continue;
-
-    Departure& d = tmp[n++];
-    strlcpy(d.cat, e["category"] | "", sizeof d.cat);
-    strlcpy(d.line, num, sizeof d.line);
-    copyDest(d, e["to"] | "", prefix);
-    d.platform[0] = 0;
-    d.when = ts + dl * 60;
-    d.delay = dl;
-    d.walk = st.walk * 60;
+    if (setDep(tmp[n], e["category"] | "", num, e["to"] | "", prefix, "",
+               e["stop"]["departureTimestamp"] | 0L, e["stop"]["delay"] | 0, st.walk, now)) n++;
   }
   storeDepartures(s, tmp, n, gen);
-  return true;
+  return RES_OK;
+}
+
+Res fetchStation(int s, const Station& st, uint32_t gen) {
+  Res res = RES_NET;
+  for (int src = 0; src < 2; src++) {
+    auto down = [](int i) { return srcDownUntil[i] && (int32_t)(millis() - srcDownUntil[i]) < 0; };
+    if (down(src) && !down(1 - src)) continue;
+    Res r = src == 0 ? (st.train ? schTrain : schStop)(s, st, gen) : (st.train ? odTrain : odStop)(s, st, gen);
+    if (r == RES_NET) { srcDownUntil[src] = (millis() + 120000) | 1; continue; }
+    srcDownUntil[src] = 0;
+    serverSeen = millis();
+    if (r == RES_OK) return r;
+    res = r;
+  }
+  return res;
+}
+
+void setStatus(int s, Res r, uint32_t gen) {
+  xSemaphoreTake(depMutex, portMAX_DELAY);
+  if (gen == cfgGen) stStatus[s] = r;
+  xSemaphoreGive(depMutex);
 }
 
 void clearDepartures() {
   xSemaphoreTake(depMutex, portMAX_DELAY);
   memset(depCount, 0, sizeof depCount);
   memset(lastOk, 0, sizeof lastOk);
+  memset(stStatus, 0, sizeof stStatus);
   xSemaphoreGive(depMutex);
 }
 
@@ -545,10 +664,8 @@ void checkUpdate() {
   filter["tag_name"] = true;
   filter["assets"][0]["name"] = true;
   filter["assets"][0]["browser_download_url"] = true;
-  bool ok = getJson(String("https://api.github.com/repos/") + GITHUB_REPO + "/releases/latest", doc, filter);
-  http.end();
-  tls.stop();  // Verbindung zu GitHub schliessen, sonst gehen Fahrplan-Abfragen an den falschen Server
-  if (!ok) return;
+  if (getJson(String("https://api.github.com/repos/") + GITHUB_REPO + "/releases/latest", doc, filter) != HTTP_CODE_OK)
+    return;
   const char* tag = doc["tag_name"] | "";
   if (*tag != 'v' || atoi(tag + 1) <= FW_BUILD) return;
   const char* url = nullptr;
@@ -567,31 +684,43 @@ void checkUpdate() {
   updating = false;
 }
 
+// Haltestellen jede Minute, Züge seltener (search.ch erlaubt 1000 Verbindungsabfragen pro Tag)
 void fetchTask(void*) {
   tls.setInsecure();
   tls.setHandshakeTimeout(15);
-  http.setReuse(true);
+  http.setReuse(false);
   http.setTimeout(8000);
+  http.setConnectTimeout(5000);
   checkUpdate();
-  uint32_t lastUpdateCheck = millis();
+  uint32_t lastUpdateCheck = millis(), lastReconnect = 0, gen = 0;
+  uint32_t due[MAX_ST] = {};
   for (;;) {
+    fetchAlive = millis();
     if (!nightNow && millis() - lastUpdateCheck > UPDATE_INTERVAL_MS) {
       lastUpdateCheck = millis();
       checkUpdate();
     }
-    if (!nightNow && WiFi.status() == WL_CONNECTED) {
+    if (nightNow) {
+    } else if (WiFi.status() != WL_CONNECTED) {
+      if (millis() - lastReconnect > 30000) { lastReconnect = millis(); WiFi.reconnect(); }
+    } else {
       Station st[MAX_ST];
       xSemaphoreTake(cfgMutex, portMAX_DELAY);
-      int n = cfgNumSt;
-      uint32_t gen = cfgGen;
-      for (int i = 0; i < n; i++) st[i] = cfgSt[i];
+      int n = cfgNumSt, trains = 0;
+      uint32_t g = cfgGen;
+      for (int i = 0; i < n; i++) { st[i] = cfgSt[i]; trains += st[i].train; }
       xSemaphoreGive(cfgMutex);
-      for (int s = 0; s < n && gen == cfgGen; s++)
-        st[s].train ? fetchTrain(s, st[s], gen) : fetchStop(s, st[s], gen);
-    } else if (!nightNow) {
-      WiFi.reconnect();
+      if (g != gen) { gen = g; memset(due, 0, sizeof due); }
+      for (int s = 0; s < n && gen == cfgGen; s++) {
+        if (due[s] && (int32_t)(millis() - due[s]) < 0) continue;
+        Res r = fetchStation(s, st[s], gen);
+        setStatus(s, r, gen);
+        uint32_t wait = r == RES_NET ? 30000 : r == RES_NOTFOUND ? 300000
+                      : st[s].train ? max(180000, 90000 * trains) : 60000;
+        due[s] = (millis() + wait) | 1;
+      }
     }
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(FETCH_INTERVAL_MS));
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000))) memset(due, 0, sizeof due);
   }
 }
 
@@ -781,6 +910,14 @@ void drawStatus(const char* msg) {
   fillBottom();
 }
 
+void drawTextScreen(const char* title, std::initializer_list<const char*> lines) {
+  invalidate();
+  tft.fillScreen(C_BG);
+  drawTitleBar(title);
+  int y = 84;
+  for (const char* l : lines) { drawLabel(tft, l, 14, y, 292, C_WHITE, UI19); y += 28; }
+}
+
 // ===================== QR-Bildschirme =====================
 void drawQR(const char* text, int x, int y, int maxSize) {
   static uint8_t buf[((7 * 4 + 17) * (7 * 4 + 17) + 7) / 8];
@@ -810,7 +947,7 @@ void drawQrScreen(const char* title, const String& qrText,
 }
 
 void showInfo(uint32_t ms) {
-  String url = "http://" + WiFi.localIP().toString() + "/";
+  String url = String("http://") + HOSTNAME + ".local/";
   drawQrScreen("Einstellungen", url,
                {"Code mit dem", "Handy scannen", "", "Handy muss im", "selben WLAN", "sein"}, url);
   infoUntil = millis() + ms;
@@ -839,6 +976,12 @@ void factoryReset() {
   restartWith("Werkseinstellungen");
 }
 
+void closeInfo() {
+  if (!infoUntil) return;
+  infoUntil = 0;
+  invalidate();
+}
+
 inline bool awake() { return wakeUntil && (int32_t)(millis() - wakeUntil) < 0; }
 
 void handleButton() {
@@ -853,7 +996,7 @@ void handleButton() {
         wakeUntil = millis() + 120000;
         if (fetchHandle) xTaskNotifyGive(fetchHandle);
       } else if (infoUntil) {
-        infoUntil = 0;
+        closeInfo();
       } else {
         showInfo(60000);
       }
@@ -878,11 +1021,16 @@ void sendJson(JsonDocument& d) {
 
 void sendOk() { server.send(200, "text/plain", "ok"); }
 
-String scanJson() {
+// Netzwerke nach Stärke; channel = Kanal des gespeicherten bzw. stärksten WLANs
+String scanJson(const String& prefer, int* channel) {
   int n = WiFi.scanNetworks();
   std::vector<int> idx;
   for (int i = 0; i < n; i++) if (WiFi.SSID(i).length()) idx.push_back(i);
   std::sort(idx.begin(), idx.end(), [](int a, int b) { return WiFi.RSSI(a) > WiFi.RSSI(b); });
+  if (channel && !idx.empty()) {
+    *channel = WiFi.channel(idx[0]);
+    for (int i : idx) if (WiFi.SSID(i) == prefer) { *channel = WiFi.channel(i); break; }
+  }
   JsonDocument d;
   JsonArray a = d.to<JsonArray>();
   std::vector<String> seen;
@@ -901,74 +1049,157 @@ String scanJson() {
   return out;
 }
 
+// Einrichtung über das offene WLAN "Abfahrtstafel". Das Handy öffnet die Seite von selbst
+// (Captive Portal). Die Tafel prüft das Passwort sofort und meldet das Ergebnis ans Handy.
+enum { P_IDLE, P_TRY, P_OK, P_PASS, P_NOTFOUND, P_FAIL };
+volatile uint8_t staReason = 0;
+
+bool wrongPassword(uint8_t r) {
+  return r == WIFI_REASON_AUTH_FAIL || r == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+         r == WIFI_REASON_HANDSHAKE_TIMEOUT || r == WIFI_REASON_AUTH_EXPIRE || r == WIFI_REASON_MIC_FAILURE;
+}
+
 [[noreturn]] void runPortal(bool hadWifi) {
+  const String saved = prefs.getString("ssid", ""), savedPass = prefs.getString("pass", "");
   WiFi.disconnect(true);
+  WiFi.setAutoReconnect(false);
   WiFi.mode(WIFI_AP_STA);
-  String networks = scanJson();
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) { staReason = info.wifi_sta_disconnected.reason; },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  int channel = 1;
+  String networks = scanJson(saved, &channel);
 
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  char apSsid[24], apPass[9];
-  snprintf(apSsid, sizeof apSsid, "Abfahrtstafel-%02X%02X", mac[4], mac[5]);
-  static const char chars[] = "abcdefghjkmnpqrstuvwxyz23456789";
-  for (int i = 0; i < 8; i++) apPass[i] = chars[esp_random() % (sizeof chars - 1)];
-  apPass[8] = 0;
-
-  WiFi.softAP(apSsid, apPass);
+  // gleicher Kanal wie das Heim-WLAN, damit das Handy beim Testen nicht rausfliegt
+  WiFi.softAP(AP_SSID, nullptr, channel);
   delay(200);
   IPAddress ip = WiFi.softAPIP();
-  String home = "http://" + ip.toString() + "/";
+  const String home = "http://" + ip.toString() + "/";
   dns.start(53, "*", ip);
+
+  static volatile uint8_t state = P_IDLE;
+  static String trySsid, tryPass;
+  static uint32_t tryStart = 0;
+  static volatile bool tryReq = false;
 
   server.on("/", HTTP_GET, [] { sendPage(PORTAL_HTML); });
   server.on("/api/networks", HTTP_GET, [&networks] {
-    if (server.hasArg("rescan")) networks = scanJson();
+    if (server.hasArg("rescan")) networks = scanJson("", nullptr);
     server.send(200, "application/json", networks);
   });
-  server.on("/save", HTTP_POST, [] {
+  server.on("/api/connect", HTTP_POST, [] {
     String ssid = server.arg("ssid");
-    if (ssid == "__other") ssid = server.arg("other");
     ssid.trim();
-    if (ssid.isEmpty()) { server.sendHeader("Location", "/"); server.send(302); return; }
-    prefs.putString("ssid", ssid);
-    prefs.putString("pass", server.arg("pass"));
-    sendPage(SAVED_HTML);
-    drawStatus("Gespeichert, starte neu...");
-    delay(2000);
-    ESP.restart();
+    if (ssid.isEmpty() || ssid.length() > 32 || server.arg("pass").length() > 63) {
+      server.send(400, "text/plain", "Ungültig");
+      return;
+    }
+    if (state == P_TRY || state == P_OK) { sendOk(); return; }
+    trySsid = ssid;
+    tryPass = server.arg("pass");
+    tryReq = true;
+    state = P_TRY;
+    sendOk();
+  });
+  server.on("/api/state", HTTP_GET, [] {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", String("{\"s\":") + (int)state + "}");
   });
   server.onNotFound([home] { server.sendHeader("Location", home); server.send(302, "text/plain", ""); });
   server.begin();
 
-  String wifiQr = String("WIFI:T:WPA;S:") + apSsid + ";P:" + apPass + ";;";
-  String footer = String("WLAN: ") + apSsid + "   Passwort: " + apPass;
-  const char* title = hadWifi ? "WLAN nicht erreichbar" : "WLAN einrichten";
-
-  int lastClients = -1;
-  uint32_t idleSince = millis();
+  const char* wifiQr = "WIFI:T:nopass;S:Abfahrtstafel;;";
+  const String footer = hadWifi ? "Gespeichert: " + saved + " - neuer Versuch jede Minute"
+                                : String("Oder am Handy das WLAN \"Abfahrtstafel\" antippen");
+  uint32_t lastRetry = millis(), bgStart = 0, okAt = 0;
+  int lastScreen = -1;
   for (;;) {
     dns.processNextRequest();
     server.handleClient();
-    int clients = WiFi.softAPgetStationNum();
-    if (clients != lastClients) {
-      lastClients = clients;
-      if (clients == 0)
-        drawQrScreen(title, wifiQr, {"1. Code mit der", "Handy-Kamera", "scannen", "2. Heim-WLAN", "auswählen"}, footer);
-      else
-        drawQrScreen("Fast geschafft", home, {"Seite öffnet", "sich von selbst.", "Sonst diesen", "Code scannen"},
-                     "Adresse: " + home);
+    const int clients = WiFi.softAPgetStationNum();
+
+    if (tryReq) {
+      tryReq = false;
+      if (bgStart) { WiFi.disconnect(); bgStart = 0; }
+      staReason = 0;
+      tryStart = millis();
+      WiFi.begin(trySsid.c_str(), tryPass.c_str());
     }
-    if (clients > 0) idleSince = millis();
-    if (hadWifi && millis() - idleSince > PORTAL_RETRY_MS) ESP.restart();
+    if (state == P_TRY) {
+      const uint32_t t = millis() - tryStart;
+      const uint8_t r = staReason;
+      int res = -1;
+      if (WiFi.status() == WL_CONNECTED) res = P_OK;
+      else if (wrongPassword(r) && t > 1000) res = P_PASS;
+      else if (t > 20000) res = r == WIFI_REASON_NO_AP_FOUND ? P_NOTFOUND : P_FAIL;
+      if (res == P_OK) {
+        prefs.putString("ssid", trySsid);
+        prefs.putString("pass", tryPass);
+        prefs.putBool("fresh", true);
+        okAt = millis();
+      } else if (res > 0) {
+        WiFi.disconnect();
+      }
+      if (res >= 0) state = res;
+    }
+    if (state == P_OK && millis() - okAt > 6000) ESP.restart();
+
+    // Gespeichertes WLAN im Hintergrund weiter versuchen (nur wenn kein Handy verbunden ist)
+    if (hadWifi && clients == 0 && state != P_TRY && state != P_OK) {
+      if (!bgStart && millis() - lastRetry > 60000) {
+        bgStart = millis();
+        WiFi.begin(saved.c_str(), savedPass.c_str());
+      } else if (bgStart && WiFi.status() == WL_CONNECTED) {
+        quietRestart();
+      } else if (bgStart && millis() - bgStart > 15000) {
+        WiFi.disconnect();
+        bgStart = 0;
+        lastRetry = millis();
+      }
+    } else if (bgStart && state != P_TRY) {
+      WiFi.disconnect();
+      bgStart = 0;
+      lastRetry = millis();
+    }
+
+    const int screen = (clients > 0) * 16 + state;
+    if (screen != lastScreen) {
+      lastScreen = screen;
+      const char* errTitle = state == P_PASS ? "Passwort falsch" : state == P_NOTFOUND ? "WLAN nicht gefunden"
+                           : state == P_FAIL ? "Verbindung fehlgeschlagen" : nullptr;
+      if (state == P_TRY) {
+        drawTextScreen("Verbinde...", {"Mit dem WLAN", trySsid.c_str(), "", "Bitte kurz warten"});
+      } else if (state == P_OK) {
+        drawTextScreen("Verbunden", {"WLAN:", trySsid.c_str(), "", "Tafel startet neu..."});
+      } else if (clients > 0 && errTitle) {
+        drawTextScreen(errTitle, {"Am Handy nochmals", "versuchen."});
+      } else if (clients > 0) {
+        drawQrScreen("Handy verbunden", home,
+                     {"Das Fenster zum", "Einrichten öffnet", "sich am Handy.", "", "Falls nicht:", "Code scannen"},
+                     "Adresse: " + home);
+      } else {
+        drawQrScreen(errTitle ? errTitle : hadWifi ? "WLAN nicht erreichbar" : "WLAN einrichten", wifiQr,
+                     {"1. Code mit der", "Handy-Kamera", "scannen", "2. Dein WLAN", "auswählen"}, footer);
+      }
+    }
     delay(5);
   }
 }
 
 void setupWeb() {
-  server.on("/", HTTP_GET, [] { sendPage(CONFIG_HTML); });
+  server.on("/", HTTP_GET, [] {
+    sendPage(CONFIG_HTML);
+    closeInfo();  // Seite ist offen: QR-Code nicht mehr nötig
+    if (prefs.isKey("fresh")) prefs.remove("fresh");
+  });
   server.on("/api/config", HTTP_GET, [] {
     JsonDocument d;
     configToJson(d, true);
+    statusJson(d["status"].to<JsonObject>());
+    sendJson(d);
+  });
+  server.on("/api/status", HTTP_GET, [] {
+    JsonDocument d;
+    statusJson(d.to<JsonObject>());
     sendJson(d);
   });
   server.on("/api/config", HTTP_POST, [] {
@@ -981,7 +1212,7 @@ void setupWeb() {
     saveConfig();
     clearDepartures();
     if (fetchHandle) xTaskNotifyGive(fetchHandle);
-    infoUntil = 0;
+    closeInfo();
     sendOk();
   });
   server.on("/api/wifireset", HTTP_POST, [] { sendOk(); delay(300); resetWifi(); });
@@ -991,7 +1222,15 @@ void setupWeb() {
 }
 
 // ===================== Setup / Loop =====================
+bool nightAt(const tm& t) {
+  int mins = t.tm_hour * 60 + t.tm_min;
+  return nightOn && nightFrom != nightTo &&
+         (nightFrom < nightTo ? (mins >= nightFrom && mins < nightTo) : (mins >= nightFrom || mins < nightTo));
+}
+
 void setup() {
+  const bool quiet = esp_reset_reason() == ESP_RST_SW && quietMagic == QUIET;
+  quietMagic = 0;
   pinMode(BOOT_PIN, INPUT_PULLUP);
   cfgMutex = xSemaphoreCreateMutex();
   depMutex = xSemaphoreCreateMutex();
@@ -1022,19 +1261,40 @@ void setup() {
   for (uint32_t start = millis(); WiFi.status() != WL_CONNECTED; delay(250))
     if (millis() - start > WIFI_TIMEOUT_MS) runPortal(true);
 
+  MDNS.begin(HOSTNAME);
+  MDNS.addService("http", "tcp", 80);
   drawStatus("Warte auf Uhrzeit...");
-  configTzTime(TZ_CH, "ch.pool.ntp.org", "pool.ntp.org");
+  configTzTime(TZ_CH, "ch.pool.ntp.org", "pool.ntp.org", "time.google.com");
   for (uint32_t start = millis(); time(nullptr) < 1700000000; delay(200))
-    if (millis() - start > 60000) ESP.restart();
+    if (millis() - start > 60000) quietRestart();
 
   setupWeb();
+  fetchAlive = serverSeen = millis();
   xTaskCreatePinnedToCore(fetchTask, "fetch", 12288, nullptr, 1, &fetchHandle, 0);
-  showInfo(20000);
+  drawStatus("Lade Abfahrten...");
+  time_t now = time(nullptr);
+  struct tm t;
+  localtime_r(&now, &t);
+  // nach der Einrichtung bleibt der Code stehen, bis die Seite geöffnet wurde (max. 10 min)
+  if (prefs.getBool("fresh", false)) showInfo(600000);
+  else if (!quiet && !nightAt(t)) showInfo(20000);
+}
+
+// Selbstheilung: hängender Abruf, lange ohne Server oder WLAN -> Neustart (nicht nachts)
+void watchdog() {
+  static uint32_t wifiLostAt = 0;
+  if (WiFi.status() == WL_CONNECTED) wifiLostAt = 0;
+  else if (!wifiLostAt) wifiLostAt = millis() | 1;
+  if (nightNow || updating) return;
+  if (millis() - fetchAlive > 10 * 60000UL) quietRestart();
+  if (wifiLostAt && millis() - wifiLostAt > 10 * 60000UL) quietRestart();
+  if (cfgNumSt && !wifiLostAt && millis() - serverSeen > 60 * 60000UL) quietRestart();
 }
 
 void loop() {
   server.handleClient();
   handleButton();
+  watchdog();
 
   static int lastSec = -1;
   static bool updateShown = false;
@@ -1059,10 +1319,7 @@ void loop() {
   lastSec = t.tm_sec;
   bool blink = !(t.tm_sec & 1);
 
-  int mins = t.tm_hour * 60 + t.tm_min;
-  bool dark = nightOn && nightFrom != nightTo && !awake() &&
-              (nightFrom < nightTo ? (mins >= nightFrom && mins < nightTo)
-                                   : (mins >= nightFrom || mins < nightTo));
+  bool dark = nightAt(t) && !awake();
   if (dark != nightNow) {
     nightNow = dark;
     if (dark) {
@@ -1073,6 +1330,7 @@ void loop() {
       tft.writecommand(TFT_SLPOUT);
       delay(120);
       tft.writecommand(TFT_DISPON);
+      serverSeen = millis();
       if (fetchHandle) xTaskNotifyGive(fetchHandle);
     }
     invalidate();
@@ -1080,11 +1338,13 @@ void loop() {
   if (dark) return;
 
   Departure feed[MAX_ST * MAX_DEPS];
-  int n = 0;
+  int n = 0, notFound = 0, netErr = 0;
   bool anyOk = false, stale = false;
   xSemaphoreTake(depMutex, portMAX_DELAY);
   for (int s = 0; s < cfgNumSt; s++) {
-    if (lastOk[s]) { anyOk = true; if (now - lastOk[s] > 180) stale = true; }
+    notFound += stStatus[s] == RES_NOTFOUND;
+    netErr += stStatus[s] == RES_NET;
+    if (lastOk[s]) { anyOk = true; if (now - lastOk[s] > (cfgSt[s].train ? 900 : 180)) stale = true; }
     for (int i = 0; i < depCount[s]; i++) {
       const Departure& d = deps[s][i];
       if (d.when < now - 30 || (d.walk > 0 && d.when - now < d.walk)) continue;
@@ -1103,8 +1363,16 @@ void loop() {
   drawHeader(t, blink, stale);
   int shown = min(n, MAX_ROWS);
   if (!anyOk || !shown) {
-    drawMessageRow(0, cfgNumSt == 0 ? "Haltestelle einstellen" : !anyOk ? "Lade Abfahrten..." : "Keine Abfahrten");
-    shown = 1;
+    const char *msg, *hint = "";
+    if (!cfgNumSt) { msg = "Haltestelle einstellen"; hint = "abfahrtstafel.local"; }
+    else if (anyOk) msg = "Keine Abfahrten";
+    else if (WiFi.status() != WL_CONNECTED) { msg = "Kein WLAN"; hint = "Verbinde neu..."; }
+    else if (notFound == cfgNumSt) { msg = "Nicht gefunden"; hint = "Namen auf der Webseite prüfen"; }
+    else if (netErr == cfgNumSt) { msg = "Fahrplan nicht erreichbar"; hint = "Versuche es weiter..."; }
+    else msg = "Lade Abfahrten...";
+    drawMessageRow(0, msg);
+    drawMessageRow(1, hint);
+    shown = 2;
   } else {
     for (int r = 0; r < shown; r++) drawRow(r, &feed[r], now, blink);
   }
