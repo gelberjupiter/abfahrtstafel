@@ -98,6 +98,7 @@ int lastSec = -1;
 bool tick();
 volatile bool updating = false;
 volatile uint32_t fetchAlive = 0, serverSeen = 0;
+volatile bool freshData = false;  // neue Abfahrten geholt -> Fallblatt klappt alles einmal durch
 
 // Neustart ohne QR-Bildschirm (z. B. nach WLAN-Ausfall), überlebt ESP.restart()
 static const uint32_t QUIET = 0x51E7B007;
@@ -126,6 +127,7 @@ uint32_t rowSig[MAX_ROWS], hdrSig;
 bool bottomDirty = true;
 
 char prevDest[MAX_ROWS][48], prevMin[MAX_ROWS][8], prevClock[2][4];
+uint8_t flapForce = 0;  // Zeilen, die ohne Änderung umklappen sollen
 void invalidate() {
   memset(rowSig, 0, sizeof rowSig);
   memset(prevDest, 0, sizeof prevDest);
@@ -733,14 +735,17 @@ void fetchTask(void*) {
       for (int i = 0; i < n; i++) { st[i] = cfgSt[i]; trains += st[i].train; }
       xSemaphoreGive(cfgMutex);
       if (g != gen) { gen = g; memset(due, 0, sizeof due); }
+      bool got = false;
       for (int s = 0; s < n && gen == cfgGen; s++) {
         if (due[s] && (int32_t)(millis() - due[s]) < 0) continue;
         Res r = fetchStation(s, st[s], gen);
         setStatus(s, r, gen);
+        got |= r == RES_OK;
         uint32_t wait = r == RES_NET ? 30000 : r == RES_NOTFOUND ? 300000
                       : st[s].train ? max(180000, 90000 * trains) : 60000;
         due[s] = (millis() + wait) | 1;
       }
+      if (got) freshData = true;
     }
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000))) memset(due, 0, sizeof due);
   }
@@ -993,8 +998,12 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
     }
     sig.str(d->cat).str(d->line).str(d->dest).str(d->platform).str(buf).val(c).val(leaving && (blink || flapFont));
   }
-  if (sig.get() == rowSig[r]) return;
+  const bool forced = d && (flapForce & (1 << r));
+  flapForce &= ~(1 << r);
+  if (!forced && sig.get() == rowSig[r]) return;
   rowSig[r] = sig.get();
+  const char* oldDest = forced ? "" : prevDest[r];
+  const char* oldMin = forced ? "" : prevMin[r];
 
   auto render = [&](int stage) {
     beginRow();
@@ -1004,14 +1013,14 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       int minW;
       if (leaving && flapFont) {
         minW = FLAP_ICON_W;
-        flapIcon(row, MIN_RIGHT - minW, 3, d->cat, c, prevMin[r][0] ? stage : 0);
+        flapIcon(row, MIN_RIGHT - minW, 3, d->cat, c, oldMin[0] || forced ? stage : 0);
       } else if (leaving) {
         minW = pixelFont ? PIX_VEH_W : VEH_W;
         if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
                              : drawVehicle(row, MIN_RIGHT, ROW_H / 2, c);
       } else if (flapFont) {
         minW = flapCharsWidth(row, buf);
-        flapChars(row, buf, prevMin[r], MIN_RIGHT - minW, 3, BASE, c, stage);
+        flapChars(row, buf, oldMin, MIN_RIGHT - minW, 3, BASE, c, stage);
       } else {
         minW = txtWidth(row, buf, BIG);
         txtDraw(row, buf, MIN_RIGHT - minW, BASE, BIG, c);
@@ -1025,14 +1034,14 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
         right -= pw + 10;
       }
       if (flapFont)
-        flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, d->dest, prevDest[r], stage, DEST_X, BASE,
+        flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, d->dest, oldDest, stage, DEST_X, BASE,
                    right - DEST_X, C_WHITE);
       else
         drawLabel(row, d->dest, DEST_X, BASE, right - DEST_X, C_WHITE);
     }
     row.pushSprite(0, rowY(r));
   };
-  if (flapFont && d && (strcmp(prevDest[r], d->dest) || strcmp(prevMin[r], buf))) {
+  if (flapFont && d && (forced || strcmp(prevDest[r], d->dest) || strcmp(prevMin[r], buf))) {
     render(1); flapPause();
     render(2); flapPause();
   }
@@ -1460,6 +1469,10 @@ bool tick() {
   if (t.tm_sec == lastSec) return false;
   lastSec = t.tm_sec;
   bool blink = !(t.tm_sec & 1);
+  if (freshData) {
+    freshData = false;
+    if (flapFont) flapForce = (1 << MAX_ROWS) - 1;
+  }
 
   bool dark = nightAt(t) && !awake();
   if (dark != nightNow) {
