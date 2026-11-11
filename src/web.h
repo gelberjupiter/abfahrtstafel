@@ -153,13 +153,15 @@ function addSt(st){
     :{type,name:nm.value.trim(),lines:[...d.sel].join(','),walk:+wk.value||0};
   let last=nm.value.trim();
   nm.onchange=()=>{if(nm.value.trim()!==last){last=nm.value.trim();d.sel.clear();lines()}};
+  let seq=0;
   async function lines(){
-    const s=nm.value.trim();if(!s){ln.innerHTML='';return}
+    const s=nm.value.trim(),my=++seq;if(!s){ln.innerHTML='';return}
     ln.innerHTML='<span class="muted">Linien werden geladen…</span>';
     let l=[];try{
       const r=await(await fetch(API+'stationboard?limit=60&fields[]=stationboard/number&fields[]=stationboard/category&station='+encodeURIComponent(s))).json();
       for(const e of r.stationboard||[])if(e.number&&!l.some(x=>x.n===e.number))l.push({c:e.category||'',n:e.number});
     }catch(e){}
+    if(my!==seq)return;
     for(const x of d.sel)if(!l.some(y=>y.n===x))l.push({c:'',n:x});
     if(!l.length){ln.innerHTML='<span class="muted">Nichts gefunden</span>';return}
     l.sort((a,b)=>(parseInt(a.n)||999)-(parseInt(b.n)||999)||a.n.localeCompare(b.n));
@@ -228,5 +230,5 @@ $('save').onclick=async()=>{
   }catch(e){$('msg').textContent='Tafel nicht erreichbar'}
   setTimeout(()=>$('msg').textContent='',3000);
 };
-load();
+load().catch(()=>{document.querySelector('main').innerHTML='<section><p>Tafel nicht erreichbar. Ist das Handy im selben WLAN?</p></section>'});
 </script></main></body></html>)HTML";

@@ -300,7 +300,13 @@ void applyConfig(JsonVariantConst j) {
       if (train && (to.isEmpty() || to.length() > 60)) continue;
       String lines = s["lines"] | "";
       lines.replace(" ", "");
-      if (lines.length() > 60) lines = lines.substring(0, 60);
+      while (lines.indexOf(",,") >= 0) lines.replace(",,", ",");
+      if (lines.startsWith(",")) lines.remove(0, 1);
+      if (lines.endsWith(",")) lines.remove(lines.length() - 1);
+      if (lines.length() > 60) {
+        int cut = lines.lastIndexOf(',', 60);
+        lines.remove(cut > 0 ? cut : 60);
+      }
       st[n].train = train;
       st[n].query = name;
       if (train) st[n].to = to; else st[n].lines = lines;
@@ -338,7 +344,7 @@ void applyConfig(JsonVariantConst j) {
 }
 
 void configToJson(JsonDocument& d, bool forWeb) {
-  char buf[6];
+  char buf[16];
   xSemaphoreTake(cfgMutex, portMAX_DELAY);
   d["title"] = cfgTitle;
   JsonArray a = d["stations"].to<JsonArray>();
@@ -554,6 +560,7 @@ void checkUpdate() {
   delay(1500);  // Hinweis auf dem Display anzeigen lassen
   WiFiClientSecure c;
   c.setInsecure();
+  c.setHandshakeTimeout(15);
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   httpUpdate.rebootOnUpdate(true);
   httpUpdate.update(c, url);  // startet bei Erfolg neu
@@ -562,12 +569,13 @@ void checkUpdate() {
 
 void fetchTask(void*) {
   tls.setInsecure();
+  tls.setHandshakeTimeout(15);
   http.setReuse(true);
   http.setTimeout(8000);
   checkUpdate();
   uint32_t lastUpdateCheck = millis();
   for (;;) {
-    if (millis() - lastUpdateCheck > UPDATE_INTERVAL_MS) {
+    if (!nightNow && millis() - lastUpdateCheck > UPDATE_INTERVAL_MS) {
       lastUpdateCheck = millis();
       checkUpdate();
     }
@@ -637,7 +645,7 @@ void drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   const char* num = strlen(d.line) <= 3 ? d.line : "";  // lange Zugnummern (z. B. 000095) weglassen
 
   if (pixelFont) {
-    char label[12];
+    char label[16];
     if (tram || bus || boat) snprintf(label, sizeof label, "%s", d.line[0] ? d.line : cat);
     else snprintf(label, sizeof label, "%s%s", cat, num);
     drawPixelLine(g, label, x);
@@ -656,7 +664,7 @@ void drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   }
 
   bool sbahn = isCat(cat, {"S", "SN"}), regio = isCat(cat, {"RE", "R", "REX"});
-  char label[12];
+  char label[16];
   snprintf(label, sizeof label, (sbahn || !*num) ? "%s%s" : "%s %s", cat, num);
   int w = constrain(txtWidth(g, label, SMALL) + 12, 42, 54);
   uint16_t bg = (sbahn || regio) ? TFT_WHITE : C_RED;
@@ -735,7 +743,7 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       if (m < 60) snprintf(buf, sizeof buf, "%ld'", m);
       else { struct tm t; localtime_r(&d->when, &t); strftime(buf, sizeof buf, "%H:%M", &t); }
     }
-    sig.add(d, offsetof(Departure, when)).str(buf).val(c).val(leaving && blink);
+    sig.str(d->cat).str(d->line).str(d->dest).str(d->platform).str(buf).val(c).val(leaving && blink);
   }
   if (sig.get() == rowSig[r]) return;
   rowSig[r] = sig.get();
@@ -1016,7 +1024,8 @@ void setup() {
 
   drawStatus("Warte auf Uhrzeit...");
   configTzTime(TZ_CH, "ch.pool.ntp.org", "pool.ntp.org");
-  while (time(nullptr) < 1700000000) delay(200);
+  for (uint32_t start = millis(); time(nullptr) < 1700000000; delay(200))
+    if (millis() - start > 60000) ESP.restart();
 
   setupWeb();
   xTaskCreatePinnedToCore(fetchTask, "fetch", 12288, nullptr, 1, &fetchHandle, 0);
