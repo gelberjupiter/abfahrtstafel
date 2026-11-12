@@ -128,6 +128,8 @@ bool bottomDirty = true;
 
 char prevDest[MAX_ROWS][48], prevMin[MAX_ROWS][8], prevClock[2][4];
 uint8_t flapForce = 0;  // Zeilen, die ohne Änderung umklappen sollen
+int pixDestX = 62;       // LED: Zielspalte rückt nach rechts, wenn eine Linie (z. B. RE37) mehr Platz braucht
+bool flapPlat = false;   // Fallblatt: Gleisspalte in allen Zeilen, sobald eine Abfahrt ein Gleis hat
 void invalidate() {
   memset(rowSig, 0, sizeof rowSig);
   memset(prevDest, 0, sizeof prevDest);
@@ -246,6 +248,47 @@ void dotDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t
         if (bits & 1) g.fillRect(x + (cx - f) * p, top + ry * p, 2, 2, color);
     }
     x += (l - f + 2) * p;
+  }
+}
+
+// Schmale LED-Schrift (3 Punkte breit) für Liniennummern und Gleis, damit alles aufs Punkteraster passt
+struct NarrowGlyph { char c; uint8_t w; uint8_t col[5]; };
+const NarrowGlyph NARROW[] = {
+  {'0', 3, {0x3E, 0x41, 0x3E, 0x00, 0x00}}, {'1', 3, {0x42, 0x7F, 0x40, 0x00, 0x00}}, {'2', 3, {0x62, 0x51, 0x4E, 0x00, 0x00}}, {'3', 3, {0x41, 0x49, 0x36, 0x00, 0x00}},
+  {'4', 3, {0x0F, 0x08, 0x7F, 0x00, 0x00}}, {'5', 3, {0x4F, 0x49, 0x31, 0x00, 0x00}}, {'6', 3, {0x3E, 0x49, 0x31, 0x00, 0x00}}, {'7', 3, {0x01, 0x79, 0x07, 0x00, 0x00}},
+  {'8', 3, {0x36, 0x49, 0x36, 0x00, 0x00}}, {'9', 3, {0x46, 0x49, 0x3E, 0x00, 0x00}}, {'A', 3, {0x7E, 0x09, 0x7E, 0x00, 0x00}}, {'B', 3, {0x7F, 0x49, 0x36, 0x00, 0x00}},
+  {'C', 3, {0x3E, 0x41, 0x41, 0x00, 0x00}}, {'D', 3, {0x7F, 0x41, 0x3E, 0x00, 0x00}}, {'E', 3, {0x7F, 0x49, 0x41, 0x00, 0x00}}, {'F', 3, {0x7F, 0x09, 0x01, 0x00, 0x00}},
+  {'G', 3, {0x3E, 0x41, 0x79, 0x00, 0x00}}, {'H', 3, {0x7F, 0x08, 0x7F, 0x00, 0x00}}, {'I', 1, {0x7F, 0x00, 0x00, 0x00, 0x00}}, {'J', 3, {0x20, 0x40, 0x3F, 0x00, 0x00}},
+  {'K', 3, {0x7F, 0x14, 0x63, 0x00, 0x00}}, {'L', 3, {0x7F, 0x40, 0x40, 0x00, 0x00}}, {'M', 5, {0x7F, 0x02, 0x0C, 0x02, 0x7F}}, {'N', 4, {0x7F, 0x06, 0x18, 0x7F, 0x00}},
+  {'O', 3, {0x3E, 0x41, 0x3E, 0x00, 0x00}}, {'P', 3, {0x7F, 0x09, 0x06, 0x00, 0x00}}, {'Q', 3, {0x3E, 0x61, 0x5E, 0x00, 0x00}}, {'R', 3, {0x7F, 0x09, 0x76, 0x00, 0x00}},
+  {'S', 3, {0x46, 0x49, 0x31, 0x00, 0x00}}, {'T', 3, {0x01, 0x7F, 0x01, 0x00, 0x00}}, {'U', 3, {0x3F, 0x40, 0x3F, 0x00, 0x00}}, {'V', 3, {0x1F, 0x60, 0x1F, 0x00, 0x00}},
+  {'W', 5, {0x7F, 0x20, 0x18, 0x20, 0x7F}}, {'X', 3, {0x63, 0x1C, 0x63, 0x00, 0x00}}, {'Y', 3, {0x07, 0x78, 0x07, 0x00, 0x00}}, {'Z', 3, {0x61, 0x5D, 0x43, 0x00, 0x00}},
+  {'l', 2, {0x3F, 0x40, 0x00, 0x00, 0x00}}, {'.', 1, {0x40, 0x00, 0x00, 0x00, 0x00}}, {' ', 1, {0x00, 0x00, 0x00, 0x00, 0x00}}, {'-', 3, {0x08, 0x08, 0x08, 0x00, 0x00}},
+  {'/', 3, {0x60, 0x1C, 0x03, 0x00, 0x00}}};
+
+const NarrowGlyph* narrowGlyph(char c) {
+  if (c >= 'a' && c <= 'z' && c != 'l') c -= 32;
+  for (auto& g : NARROW) if (g.c == c) return &g;
+  return nullptr;
+}
+
+int narrowWidth(const char* s) {
+  int w = 0;
+  for (; *s; s++) { auto gl = narrowGlyph(*s); w += (gl ? gl->w : 3) + 1; }
+  return w ? (w - 1) * 3 - 1 : 0;
+}
+
+// gleiche Höhe und gleiches Raster wie die grosse Punktschrift, nur schmaler
+void narrowDraw(TFT_eSPI& g, const char* s, int x, int baseline, uint16_t color) {
+  const int top = baseline - 21;
+  x -= x % 3;
+  for (; *s; s++) {
+    auto gl = narrowGlyph(*s);
+    const int w = gl ? gl->w : 3;
+    for (int cx = 0; gl && cx < w; cx++)
+      for (int ry = 0, bits = gl->col[cx]; bits; ry++, bits >>= 1)
+        if (bits & 1) g.fillRect(x + cx * 3, top + ry * 3, 2, 2, color);
+    x += (w + 1) * 3;
   }
 }
 
@@ -816,10 +859,46 @@ void fetchTask(void*) {
 const uint16_t PIX_BUS[8]   = {0x0FE, 0x1FF, 0x125, 0x125, 0x1FF, 0x1FF, 0x0C6, 0x0C6};
 const uint16_t PIX_TRAM[8]  = {0x07C, 0x010, 0x1FF, 0x155, 0x1FF, 0x1FF, 0x082, 0x1FF};
 const uint16_t PIX_TRAIN[8] = {0x0FC, 0x1B6, 0x1FF, 0x1FF, 0x101, 0x1FF, 0x092, 0x1FF};
+const uint16_t PIX_BOAT[8]  = {0x010, 0x038, 0x07C, 0x1FF, 0x0FE, 0x07C, 0x000, 0x155};
 static const int PIX_VEH_W = 27, VEH_W = 26;
 
-void drawVehicle(TFT_eSPI& g, int xRight, int cy, uint16_t c) {
+const uint16_t* pixVehicle(const char* cat) {
+  return isBus(cat) ? PIX_BUS : isTram(cat) ? PIX_TRAM : isBoat(cat) ? PIX_BOAT : PIX_TRAIN;
+}
+
+// Abfahrt jetzt (Normal-Schrift): Bus, Tram, Zug oder Schiff als flaches Symbol
+void drawVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c) {
   const int w = 26, h = 14, x = xRight - w, y = cy - h / 2 - 2;
+  if (isBoat(cat)) {
+    g.fillRect(x + 9, y + 1, 9, 6, c);
+    g.fillRect(x + 11, y + 3, 5, 2, C_BG);
+    g.fillRect(x + 1, y + 7, 24, 4, c);
+    g.fillTriangle(x + 1, y + 10, x + 24, y + 10, x + 20, y + 14, c);
+    g.fillTriangle(x + 1, y + 10, x + 20, y + 14, x + 5, y + 14, c);
+    for (int i = 0; i < 4; i++) g.drawLine(x + 1 + i * 6, y + 17, x + 4 + i * 6, y + 16, c);
+    return;
+  }
+  if (isTram(cat)) {
+    g.drawLine(x + 9, y + 2, x + 13, y - 2, c);
+    g.drawLine(x + 17, y + 2, x + 13, y - 2, c);
+    g.drawFastHLine(x + 9, y - 3, 9, c);
+    g.fillRoundRect(x, y + 2, w, h - 1, 2, c);
+    for (int i = 0; i < 3; i++) g.fillRect(x + 3 + i * 8, y + 5, 6, 4, C_BG);
+    g.fillRect(x + 3, y + h + 1, 6, 2, c);
+    g.fillRect(x + w - 9, y + h + 1, 6, 2, c);
+    return;
+  }
+  if (!isBus(cat)) {  // Zug mit schräger Front
+    g.fillRoundRect(x, y, w - 6, h, 2, c);
+    g.fillTriangle(x + w - 7, y, x + w - 7, y + h - 1, x + w - 1, y + h - 1, c);
+    g.fillRect(x + 3, y + 3, 5, 5, C_BG);
+    g.fillRect(x + 11, y + 3, 5, 5, C_BG);
+    g.fillTriangle(x + w - 6, y + 3, x + w - 6, y + 8, x + w - 2, y + 8, C_BG);
+    g.drawFastHLine(x, y + h - 4, w - 2, C_BG);
+    g.fillCircle(x + 5, y + h + 1, 2, c);
+    g.fillCircle(x + w - 9, y + h + 1, 2, c);
+    return;
+  }
   g.fillRoundRect(x, y, w, h, 3, c);
   for (int i = 0; i < 3; i++) g.fillRect(x + 3 + i * 8, y + 3, 6, 5, C_BG);
   g.fillCircle(x + 6, y + h + 1, 2, c);
@@ -827,7 +906,7 @@ void drawVehicle(TFT_eSPI& g, int xRight, int cy, uint16_t c) {
 }
 
 void drawPixelVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c) {
-  const uint16_t* bm = isBus(cat) ? PIX_BUS : isTram(cat) ? PIX_TRAM : PIX_TRAIN;
+  const uint16_t* bm = pixVehicle(cat);
   const int x0 = (xRight - PIX_VEH_W) / 3 * 3, y0 = cy - 13;
   for (int ry = 0; ry < 8; ry++)
     for (int cx = 0; cx < 9; cx++)
@@ -849,10 +928,21 @@ void drawItalic(TFT_eSPI& g, const char* txt, int cx, int cy, uint16_t color) {
 }
 
 // LED-Tafel: Linie nur als Leuchtschrift, bei Platzmangel kleiner
+// LED-Tafel: Linie in der Leuchtschrift auf dem Raster; nur wenn sie selbst mit verschobener
+// Zielspalte nicht passt, in der schmalen Schrift
+void pixLabel(const Departure& d, char* out, size_t n) {
+  if (isTram(d.cat) || isBus(d.cat) || isBoat(d.cat)) { snprintf(out, n, "%s", d.line[0] ? d.line : d.cat); return; }
+  const char* num = strlen(d.line) <= 3 && strcmp(d.line, d.cat) ? d.line : "";
+  snprintf(out, n, "%s%s", d.cat, num);
+}
+
 void drawPixelLine(TFT_eSPI& g, const char* label, int x) {
-  const int maxW = DEST_X - x - 8;
-  if (dotWidth(label, BIG) <= maxW) dotDraw(g, label, x, BASE, BIG, C_WHITE);
-  else drawLabel(g, label, x, BASE - 1, maxW, C_WHITE, SMALL);
+  const int maxW = pixDestX - x - 6;
+  if (dotWidth(label, BIG) <= maxW) { dotDraw(g, label, x, BASE, BIG, C_WHITE); return; }
+  char buf[16];
+  strlcpy(buf, label, sizeof buf);
+  for (int n = strlen(buf); n > 1 && narrowWidth(buf) > maxW;) buf[--n] = 0;
+  narrowDraw(g, buf, x, BASE, C_WHITE);
 }
 
 int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
@@ -860,11 +950,11 @@ int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   bool tram = isTram(cat), bus = isBus(cat), boat = isBoat(cat);
   const int y = cy - BADGE_H / 2;
   const char* num = strlen(d.line) <= 3 ? d.line : "";  // lange Zugnummern (z. B. 000095) weglassen
+  if (!strcmp(num, cat)) num = "";                        // ohne Liniennummer: "IC" statt "IC IC"
 
   if (pixelFont) {
     char label[16];
-    if (tram || bus || boat) snprintf(label, sizeof label, "%s", d.line[0] ? d.line : cat);
-    else snprintf(label, sizeof label, "%s%s", cat, num);
+    pixLabel(d, label, sizeof label);
     drawPixelLine(g, label, x);
     return 0;
   }
@@ -883,7 +973,8 @@ int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   bool sbahn = isCat(cat, {"S", "SN"}), regio = isCat(cat, {"RE", "R", "REX"});
   char label[16];
   snprintf(label, sizeof label, (sbahn || !*num) ? "%s%s" : "%s %s", cat, num);
-  int w = constrain(txtWidth(g, label, SMALL) + 12, 42, 54);
+  if (txtWidth(g, label, SMALL) + 12 > 50) snprintf(label, sizeof label, "%s%s", cat, num);  // "RE37" statt "RE 37"
+  int w = constrain(txtWidth(g, label, SMALL) + 12, 42, 50);
   uint16_t bg = (sbahn || regio) ? TFT_WHITE : C_RED;
   uint16_t fg = sbahn ? TFT_BLACK : regio ? C_RED : TFT_WHITE;
   uint16_t border = sbahn ? TFT_BLACK : C_RED;
@@ -960,7 +1051,7 @@ void flapIcon(TFT_eSPI& g, int x, int top, const char* cat, uint16_t color, int 
   const uint16_t tc = flapColor(), lo = tft.alphaBlend(190, tc, TFT_BLACK);
   g.fillRect(x, top, w, half, tc);
   g.fillRect(x, top + half, w, FLAP_H - half, lo);
-  const uint16_t* bm = isBus(cat) ? PIX_BUS : isTram(cat) ? PIX_TRAM : PIX_TRAIN;
+  const uint16_t* bm = pixVehicle(cat);
   const int x0 = x + (w - 18) / 2, y0 = top + (FLAP_H - 16) / 2;
   g.setViewport(x, top, w, stage ? half : FLAP_H, false);
   for (int ry = 0; ry < 8; ry++)
@@ -1081,7 +1172,9 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       else { struct tm t; localtime_r(&d->when, &t); strftime(buf, sizeof buf, "%H:%M", &t); }
     }
     sig.str(d->cat).str(d->line).str(d->dest).str(d->platform).str(buf).val(c).val(leaving && (blink || flapFont));
+    sig.val(pixDestX).val(flapPlat);
   }
+  const int destX = pixelFont ? pixDestX : DEST_X;
   const bool forced = d && (flapForce & (1 << r));
   flapForce &= ~(1 << r);
   if (!forced && sig.get() == rowSig[r]) return;
@@ -1101,27 +1194,45 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       } else if (leaving) {
         minW = pixelFont ? PIX_VEH_W : VEH_W;
         if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
-                             : drawVehicle(row, MIN_RIGHT, ROW_H / 2, c);
+                             : drawVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c);
       } else if (flapFont) {
         minW = flapCharsWidth(row, nm);
         flapChars(row, nm, om, MIN_RIGHT - minW, 3, BASE, c, stage);
+        if (strlen(nm) == 2)  // einstellige Minute: leeres Zehner-Blatt wie auf der echten Tafel
+          flapModule(row, MIN_RIGHT - minW - FLAP_P, 3, FLAP_W, "", "", 0, -1, BASE, 0, c);
       } else {
         minW = txtWidth(row, buf, BIG);
         txtDraw(row, buf, MIN_RIGHT - minW, BASE, BIG, c);
       }
+      if (flapFont) minW = max(minW, flapCharsWidth(row, "00'"));  // feste Spalten wie auf der echten Tafel
       int right = MIN_RIGHT - minW - 10;
-      if (d->platform[0]) {
+      if (flapFont && flapPlat) {  // Gleisnummer auf eigenem Blatt, leeres Blatt wenn ohne Gleis
+        const int mw = max(FLAP_W, txtWidth(row, "00", BIG) + 6), lw = txtWidth(row, "Gl.", SMALL);
+        flapModule(row, right - mw, 3, mw, d->platform, d->platform, 0, -1, BASE, 0, C_LABEL);
+        if (d->platform[0]) txtDraw(row, "Gl.", right - mw - 3 - lw, BASE - 1, SMALL, C_LABEL);
+        right -= mw + lw + 13;
+      } else if (d->platform[0]) {
         char pl[14];
-        snprintf(pl, sizeof pl, "Gl. %s", d->platform);
-        int pw = txtWidth(row, pl, SMALL);
-        txtDraw(row, pl, right - pw, BASE - (pixelFont ? 2 : 1), SMALL, C_LABEL);
-        right -= pw + 10;
+        if (pixelFont) {  // Gleis als leuchtendes Schild mit dunkler Nummer, alles auf dem Raster
+          const int cols = (dotWidth(d->platform, BIG) + 1) / 3;
+          int x0 = right - (cols + 1) * 3 - 1;
+          x0 -= x0 % 3;
+          for (int x = x0; x <= x0 + (cols + 1) * 3; x += 3)
+            for (int y = 3; y <= 27; y += 3) row.fillRect(x, y, 2, 2, C_LABEL);
+          dotDraw(row, d->platform, x0 + 3, BASE + 3, BIG, C_BG);
+          right = x0 - 9;
+        } else {
+          snprintf(pl, sizeof pl, "Gl. %s", d->platform);
+          const int pw = txtWidth(row, pl, SMALL);
+          txtDraw(row, pl, right - pw, BASE - 1, SMALL, C_LABEL);
+          right -= pw + 10;
+        }
       }
       if (flapFont)
         flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, nd, od, stage, DEST_X, BASE,
                    right - DEST_X, C_WHITE);
       else
-        drawLabel(row, d->dest, DEST_X, BASE, right - DEST_X, C_WHITE);
+        drawLabel(row, d->dest, destX, BASE, right - destX, C_WHITE);
     }
     row.pushSprite(0, rowY(r));
   };
@@ -1668,6 +1779,16 @@ bool tick() {
     drawMessageRow(1, hint);
     shown = 2;
   } else {
+    int dx = DEST_X;
+    bool plat = false;
+    for (int r = 0; r < shown; r++) {
+      char l[16];
+      pixLabel(feed[r], l, sizeof l);
+      dx = max(dx, 6 + dotWidth(l, BIG) + 7);
+      plat |= feed[r].platform[0] != 0;
+    }
+    pixDestX = min((dx + 2) / 3 * 3, 84);
+    flapPlat = plat;
     for (int r = 0; r < shown; r++) drawRow(r, &feed[r], now, blink);
   }
   for (int r = shown; r < MAX_ROWS; r++) drawRow(r, nullptr, now, blink);
