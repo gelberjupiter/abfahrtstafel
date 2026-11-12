@@ -6,7 +6,8 @@ Daten von search.ch, bei Ausfall automatisch von transport.opendata.ch.
 ## Updates
 
 Jeder Push auf `main` baut über GitHub Actions eine neue Firmware und veröffentlicht sie als Release (`v<Nummer>`).
-Die Tafel prüft beim Start und alle 6 Stunden, ob es ein neueres Release gibt, und installiert es selbst.
+Die Tafel prüft beim Start und alle 30 Minuten, ob es ein neueres Release gibt, und installiert es selbst.
+Während des Updates zeigt sie Fortschritt in Prozent und die geschätzte Restzeit.
 
 ## Verkabelung
 
@@ -24,7 +25,8 @@ Die Tafel prüft beim Start und alle 6 Stunden, ob es ein neueres Release gibt, 
 
 - Erster Start: QR-Code scannen (oder WLAN "Abfahrtstafel" antippen). Das Einrichtungsfenster öffnet sich
   von selbst, WLAN wählen, Passwort eingeben. Die Tafel prüft das Passwort sofort.
-- Einstellungen: http://abfahrtstafel.local (Handy im selben WLAN).
+- Einstellungen: http://abfahrtstafel.local (Handy im selben WLAN). Der QR-Code dazu erscheint beim Start
+  nur, solange noch etwas einzurichten ist (nach der WLAN-Einrichtung oder ohne Haltestelle).
 - BOOT kurz drücken: QR-Code zur Einstellungsseite (nachts: Tafel 2 Minuten einschalten).
 - BOOT 5 s halten: WLAN zurücksetzen.
 

@@ -25,7 +25,7 @@ static const uint32_t WIFI_TIMEOUT_MS = 30000;
 static const char* TZ_CH = "CET-1CEST,M3.5.0,M10.5.0/3";
 static const char* SCH = "https://search.ch/timetable/api/";
 static const char* OD = "https://transport.opendata.ch/v1/";
-static const uint32_t UPDATE_INTERVAL_MS = 6UL * 3600 * 1000;
+static const uint32_t UPDATE_INTERVAL_MS = 30UL * 60 * 1000;  // GitHub erlaubt 60 Abfragen/h ohne Login
 #ifndef FW_BUILD
 #define FW_BUILD 0
 #endif
@@ -97,14 +97,14 @@ uint32_t infoUntil = 0, wakeUntil = 0;
 int lastSec = -1;
 bool tick();
 volatile bool updating = false;
+volatile int updCur = 0, updTotal = 0, updTo = 0;  // updTotal < 0: fehlgeschlagen
+volatile uint32_t updStart = 0;
+char updErr[64] = "";
 volatile uint32_t fetchAlive = 0, serverSeen = 0;
 volatile bool freshData = false;  // neue Abfahrten geholt -> Fallblatt klappt alles einmal durch
 
-// Neustart ohne QR-Bildschirm (z. B. nach WLAN-Ausfall), überlebt ESP.restart()
-static const uint32_t QUIET = 0x51E7B007;
-RTC_NOINIT_ATTR uint32_t quietMagic;
+// Neustart ohne Hinweis auf dem Display (z. B. nach WLAN-Ausfall)
 [[noreturn]] void quietRestart() {
-  quietMagic = QUIET;
   ESP.restart();
   for (;;) {}
 }
@@ -697,14 +697,25 @@ void checkUpdate() {
     if (!strcmp(a["name"] | "", "firmware.bin")) url = a["browser_download_url"];
   if (!url) return;
 
+  updTo = atoi(tag + 1);
+  updCur = updTotal = 0;
+  updStart = 0;
   updating = true;
-  delay(1500);  // Hinweis auf dem Display anzeigen lassen
   WiFiClientSecure c;
   c.setInsecure();
   c.setHandshakeTimeout(15);
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   httpUpdate.rebootOnUpdate(true);
+  httpUpdate.onProgress([](int cur, int total) {
+    if (!updStart) updStart = millis();
+    updCur = cur;
+    updTotal = total;
+    fetchAlive = millis();  // Watchdog greift nur, wenn der Download wirklich steht
+  });
   httpUpdate.update(c, url);  // startet bei Erfolg neu
+  strlcpy(updErr, httpUpdate.getLastErrorString().c_str(), sizeof updErr);
+  updTotal = -1;  // Fehler kurz anzeigen, nächster Versuch beim nächsten Check
+  delay(8000);
   updating = false;
 }
 
@@ -1109,6 +1120,42 @@ void drawTextScreen(const char* title, std::initializer_list<const char*> lines)
   for (const char* l : lines) { drawLabel(tft, l, 14, y, 292, C_WHITE, UI19); y += 28; }
 }
 
+// Update-Fortschritt: Balken, Prozent, KB und geschätzte Restzeit (nur bei Änderung neu zeichnen)
+void drawUpdate(int& shown) {
+  const int total = updTotal, cur = updCur;
+  const int pct = total < 0 ? -2 : total > 0 ? (int)((int64_t)cur * 100 / total) : -1;
+  if (pct == shown) return;
+  static const int BX = 14, BY = 104, BW = 292, BH = 22;
+  if (shown == -3) {
+    char l[40];
+    snprintf(l, sizeof l, "Version %d wird installiert", updTo);
+    drawTextScreen("Software-Update", {l});
+    drawLabel(tft, "Bitte nicht ausstecken", 14, 226, 292, C_LABEL, UI2);
+    tft.drawRect(BX, BY, BW, BH, C_WHITE);
+  }
+  shown = pct;
+  tft.fillRect(0, 140, SCREEN_W, 64, C_BG);
+  if (pct == -2) {
+    drawLabel(tft, "Update fehlgeschlagen", 14, 166, 292, C_YELLOW, UI19);
+    drawLabel(tft, *updErr ? updErr : "Versuche es später nochmals", 14, 192, 292, C_LABEL, UI2);
+    return;
+  }
+  if (pct < 0) { drawLabel(tft, "Verbinde mit GitHub...", 14, 166, 292, C_WHITE, UI19); return; }
+  tft.fillRect(BX + 2, BY + 2, (BW - 4) * pct / 100, BH - 4, C_GO);
+  char s[48];
+  snprintf(s, sizeof s, "%d %%", pct);
+  drawLabel(tft, s, 14, 170, 120, C_WHITE, BIG);
+  if (pct >= 100) {
+    strcpy(s, "Fertig, startet neu...");
+  } else {
+    const uint32_t el = millis() - updStart;
+    const int rem = cur > 0 ? (int)((uint64_t)el * (total - cur) / cur / 1000) : 0;
+    if (cur > 0 && el > 2000) snprintf(s, sizeof s, "%d von %d KB, noch ca. %d:%02d", cur / 1024, total / 1024, rem / 60, rem % 60);
+    else snprintf(s, sizeof s, "%d von %d KB", cur / 1024, total / 1024);
+  }
+  drawLabel(tft, s, 14, 196, 292, C_LABEL, UI19);
+}
+
 // ===================== QR-Bildschirme =====================
 void drawQR(const char* text, int x, int y, int maxSize) {
   static uint8_t buf[((7 * 4 + 17) * (7 * 4 + 17) + 7) / 8];
@@ -1420,8 +1467,6 @@ bool nightAt(const tm& t) {
 }
 
 void setup() {
-  const bool quiet = esp_reset_reason() == ESP_RST_SW && quietMagic == QUIET;
-  quietMagic = 0;
   pinMode(BOOT_PIN, INPUT_PULLUP);
   cfgMutex = xSemaphoreCreateMutex();
   depMutex = xSemaphoreCreateMutex();
@@ -1466,9 +1511,9 @@ void setup() {
   time_t now = time(nullptr);
   struct tm t;
   localtime_r(&now, &t);
-  // nach der Einrichtung bleibt der Code stehen, bis die Seite geöffnet wurde (max. 10 min)
-  if (prefs.getBool("fresh", false)) showInfo(600000);
-  else if (!quiet && !nightAt(t)) showInfo(20000);
+  // QR-Code nur, wenn noch etwas einzurichten ist: nach der WLAN-Einrichtung oder ohne Haltestelle
+  // (bleibt stehen, bis die Seite geöffnet wurde, max. 10 min). Sonst: BOOT-Taste kurz drücken.
+  if (!nightAt(t) && (prefs.getBool("fresh", false) || !cfgNumSt)) showInfo(600000);
 }
 
 // Selbstheilung: hängender Abruf, lange ohne Server oder WLAN -> Neustart (nicht nachts)
@@ -1487,13 +1532,14 @@ void loop() {
   handleButton();
   watchdog();
 
-  static bool updateShown = false;
+  static int updShown = -3;  // -3 = nicht sichtbar
   if (updating) {
-    if (!updateShown) { updateShown = true; drawStatus("Update wird installiert..."); }
-    delay(20);
+    infoUntil = 0;
+    drawUpdate(updShown);
+    delay(50);
     return;
   }
-  if (updateShown) { updateShown = false; invalidate(); }
+  if (updShown != -3) { updShown = -3; invalidate(); }
 
   if (infoUntil) {
     if ((int32_t)(millis() - infoUntil) < 0) { delay(5); return; }
