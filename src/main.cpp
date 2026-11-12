@@ -844,6 +844,7 @@ void flapModule(TFT_eSPI& g, int x, int top, int w, const char* now, const char*
                 int tx, int baseline, int maxW, uint16_t color) {
   const int half = FLAP_H / 2;
   const uint16_t tc = flapColor(), lo = tft.alphaBlend(190, tc, TFT_BLACK);
+  if (stage && !strcmp(now, old)) stage = 0;  // gleiches Blatt bleibt stehen
   g.fillRect(x, top, w, half, tc);
   g.fillRect(x, top + half, w, FLAP_H - half, lo);
   auto text = [&](const char* s, int y0, int h) {
@@ -909,7 +910,20 @@ void flapIcon(TFT_eSPI& g, int x, int top, const char* cat, uint16_t color, int 
   g.drawFastHLine(x, top + half, w, TFT_BLACK);
 }
 
-inline void flapPause() { delay(45); }
+// Rattern: jeder Wechsel läuft über mehrere Blätter, das letzte ist das Ziel
+static const int RATTLE = 4;
+inline void flapPause() { delay(12); }
+
+// Zwischenstand k (1..RATTLE) der Ziffern: geänderte Ziffern laufen wie echte Blätter vorwärts aufs Ziel zu
+void rattleDigits(char* out, const char* s, const char* old, int k) {
+  const int n = strlen(s), on = strlen(old);
+  for (int i = 0; i <= n; i++) {
+    out[i] = s[i];
+    const int j = i + on - n;
+    if (i < n && isdigit((uint8_t)s[i]) && (j < 0 || old[j] != s[i]))
+      out[i] = '0' + (s[i] - '0' + 10 - (RATTLE - k)) % 10;
+  }
+}
 
 void drawTitleBar(const char* title) {
   hdr.fillSprite(C_HDR);
@@ -927,13 +941,13 @@ void drawHeader(const tm& t, bool colon, bool stale) {
     char hh[4], mm[4];
     snprintf(hh, sizeof hh, "%02d", t.tm_hour);
     snprintf(mm, sizeof mm, "%02d", t.tm_min);
-    auto render = [&](int stage) {
+    auto render = [&](int stage, const char* h, const char* oh, const char* m, const char* om) {
       hdr.fillSprite(C_HDR);
       dotGrid(hdr, HEADER_H, 1, C_HDR);
       drawLabel(hdr, cfgTitle.c_str(), 8, HDR_BASE, 220, C_WHITE);
       if (flapFont) {
-        flapChars(hdr, hh, prevClock[0], CLOCK_X - 4 - flapCharsWidth(hdr, hh), HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
-        flapChars(hdr, mm, prevClock[1], CLOCK_X + 4, HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
+        flapChars(hdr, h, oh, CLOCK_X - 4 - flapCharsWidth(hdr, h), HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
+        flapChars(hdr, m, om, CLOCK_X + 4, HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
       } else {
         txtDraw(hdr, hh, CLOCK_X - 4 - txtWidth(hdr, hh, BIG), HDR_BASE, BIG, C_WHITE);
         txtDraw(hdr, mm, CLOCK_X + 4, HDR_BASE, BIG, C_WHITE);
@@ -942,10 +956,19 @@ void drawHeader(const tm& t, bool colon, bool stale) {
       hdr.pushSprite(0, 0);
     };
     if (flapFont && (strcmp(hh, prevClock[0]) || strcmp(mm, prevClock[1]))) {
-      render(1); flapPause();
-      render(2); flapPause();
+      char ah[4], am[4], bh[4], bm[4];
+      strcpy(bh, prevClock[0]);
+      strcpy(bm, prevClock[1]);
+      for (int k = 1; k <= RATTLE; k++) {
+        rattleDigits(ah, hh, prevClock[0], k);
+        rattleDigits(am, mm, prevClock[1], k);
+        render(1, ah, bh, am, bm); flapPause();
+        render(2, ah, bh, am, bm); flapPause();
+        strcpy(bh, ah);
+        strcpy(bm, am);
+      }
     }
-    render(0);
+    render(0, hh, hh, mm, mm);
     strcpy(prevClock[0], hh);
     strcpy(prevClock[1], mm);
   }
@@ -1005,7 +1028,7 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
   const char* oldDest = forced ? "" : prevDest[r];
   const char* oldMin = forced ? "" : prevMin[r];
 
-  auto render = [&](int stage) {
+  auto render = [&](int stage, const char* nd, const char* od, const char* nm, const char* om, const char* icat) {
     beginRow();
     if (d) {
       int bw = drawBadge(row, *d, 6, ROW_H / 2);
@@ -1013,14 +1036,14 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       int minW;
       if (leaving && flapFont) {
         minW = FLAP_ICON_W;
-        flapIcon(row, MIN_RIGHT - minW, 3, d->cat, c, oldMin[0] || forced ? stage : 0);
+        flapIcon(row, MIN_RIGHT - minW, 3, icat, c, oldMin[0] || forced ? stage : 0);
       } else if (leaving) {
         minW = pixelFont ? PIX_VEH_W : VEH_W;
         if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
                              : drawVehicle(row, MIN_RIGHT, ROW_H / 2, c);
       } else if (flapFont) {
-        minW = flapCharsWidth(row, buf);
-        flapChars(row, buf, oldMin, MIN_RIGHT - minW, 3, BASE, c, stage);
+        minW = flapCharsWidth(row, nm);
+        flapChars(row, nm, om, MIN_RIGHT - minW, 3, BASE, c, stage);
       } else {
         minW = txtWidth(row, buf, BIG);
         txtDraw(row, buf, MIN_RIGHT - minW, BASE, BIG, c);
@@ -1034,7 +1057,7 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
         right -= pw + 10;
       }
       if (flapFont)
-        flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, d->dest, oldDest, stage, DEST_X, BASE,
+        flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, nd, od, stage, DEST_X, BASE,
                    right - DEST_X, C_WHITE);
       else
         drawLabel(row, d->dest, DEST_X, BASE, right - DEST_X, C_WHITE);
@@ -1042,10 +1065,30 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
     row.pushSprite(0, rowY(r));
   };
   if (flapFont && d && (forced || strcmp(prevDest[r], d->dest) || strcmp(prevMin[r], buf))) {
-    render(1); flapPause();
-    render(2); flapPause();
+    // Zwischenblätter: Ziele der anderen Zeilen (wie gedruckte Ortsnamen), Ziffern zählen hoch
+    static const char* const ICONS[] = {"B", "T", "IC"};
+    const char* pool[RATTLE];
+    int np = 0;
+    for (int i = 1; i < MAX_ROWS && np < RATTLE - 1; i++) {
+      const char* p = prevDest[(r + i) % MAX_ROWS];
+      if (*p && strcmp(p, d->dest)) pool[np++] = p;
+    }
+    const bool destCh = strcmp(oldDest, d->dest) != 0;
+    const char* bd = oldDest;
+    char am[8], bm[8];
+    strlcpy(bm, oldMin, sizeof bm);
+    for (int k = 1; k <= RATTLE; k++) {
+      const bool last = k == RATTLE;
+      const char* ad = last || !destCh ? d->dest : k - 1 < np ? pool[k - 1] : "";
+      rattleDigits(am, buf, oldMin, k);
+      const char* ic = last || !(oldMin[0] || forced) ? d->cat : ICONS[(r + k) % 3];
+      render(1, ad, bd, am, bm, ic); flapPause();
+      render(2, ad, bd, am, bm, ic); flapPause();
+      bd = ad;
+      strlcpy(bm, am, sizeof bm);
+    }
   }
-  render(0);
+  render(0, d ? d->dest : "", d ? d->dest : "", buf, buf, d ? d->cat : "");
   strlcpy(prevDest[r], d ? d->dest : "", sizeof prevDest[r]);
   strlcpy(prevMin[r], buf, sizeof prevMin[r]);
 }
