@@ -526,12 +526,13 @@ bool setDep(Departure& d, const char* cat, const char* line, const char* to, con
 Res schStop(int s, const Station& st, uint32_t gen) {
   JsonDocument filter, doc;
   JsonObject c = filter["connections"][0].to<JsonObject>();
-  for (const char* k : {"time", "*G", "*L", "line", "dep_delay"}) c[k] = true;
+  for (const char* k : {"time", "*G", "*L", "line", "dep_delay", "type", "track"}) c[k] = true;
   c["terminal"]["name"] = true;
   filter["stop"]["name"] = true;
   filter["messages"] = true;
-  int code = getJson(String(SCH) + "stationboard.json?limit=30&show_delays=1&stop=" + urlEncode(st.query.c_str()),
-                     doc, filter);
+  // mit Linienfilter weiter vorausschauen, sonst bleiben seltene Linien leer
+  int code = getJson(String(SCH) + "stationboard.json?limit=" + (st.lines.length() ? "60" : "30") +
+                     "&show_delays=1&stop=" + urlEncode(st.query.c_str()), doc, filter);
   if (code != HTTP_CODE_OK) return httpRes(code);
   if (!doc["connections"].is<JsonArray>() && doc["messages"].is<JsonArray>()) return RES_NOTFOUND;
 
@@ -545,7 +546,9 @@ Res schStop(int s, const Station& st, uint32_t gen) {
     if (*dl == 'X') continue;  // ausgefallen
     const char* num = e["*L"] | (e["line"] | "");
     if (!lineAllowed(st.lines.c_str(), num)) continue;
-    if (setDep(tmp[n], e["*G"] | "", num, e["terminal"]["name"] | "", prefix, "",
+    // Gleis nur bei Zügen (bei Bus/Tram ist "track" die Kante)
+    const char* track = strstr(e["type"] | "", "train") ? (e["track"] | "") : "";
+    if (setDep(tmp[n], e["*G"] | "", num, e["terminal"]["name"] | "", prefix, track,
                parseTime(e["time"] | ""), atoi(dl), st.walk, now)) n++;
   }
   storeDepartures(s, tmp, n, gen);
@@ -629,11 +632,13 @@ Res odStop(int s, const Station& st, uint32_t gen) {
   b["to"] = true;
   b["stop"]["departureTimestamp"] = true;
   b["stop"]["delay"] = true;
+  b["stop"]["platform"] = true;
   filter["station"]["name"] = true;
 
   int code = getJson(String(OD) + "stationboard?limit=30&fields[]=station/name"
       "&fields[]=stationboard/category&fields[]=stationboard/number&fields[]=stationboard/to"
-      "&fields[]=stationboard/stop/departureTimestamp&fields[]=stationboard/stop/delay&station=" +
+      "&fields[]=stationboard/stop/departureTimestamp&fields[]=stationboard/stop/delay"
+      "&fields[]=stationboard/stop/platform&station=" +
       urlEncode(st.query.c_str()), doc, filter);
   if (code != HTTP_CODE_OK) return httpRes(code);
   if (!doc["station"]["name"].is<const char*>()) return RES_NOTFOUND;
@@ -646,7 +651,9 @@ Res odStop(int s, const Station& st, uint32_t gen) {
     if (n >= 16) break;
     const char* num = e["number"] | "";
     if (!lineAllowed(st.lines.c_str(), num)) continue;
-    if (setDep(tmp[n], e["category"] | "", num, e["to"] | "", prefix, "",
+    const char* cat = e["category"] | "";
+    const char* track = isTram(cat) || isBus(cat) || isBoat(cat) ? "" : (e["stop"]["platform"] | "");
+    if (setDep(tmp[n], cat, num, e["to"] | "", prefix, track,
                e["stop"]["departureTimestamp"] | 0L, e["stop"]["delay"] | 0, st.walk, now)) n++;
   }
   storeDepartures(s, tmp, n, gen);

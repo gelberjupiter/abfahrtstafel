@@ -45,6 +45,13 @@ button.warn{background:#c00;color:#fff}
 .note{font-weight:600;margin:12px 0 0;min-height:1.4em}.bad{color:#c00}.good{color:#1a2ab0}
 .stw{color:#c00;font-size:14px;font-weight:600;margin:6px 0 0}
 #warn{background:#fff4d6;color:#7a5200;font-weight:600}
+.ac{position:relative}
+.sug{position:absolute;left:0;right:0;top:calc(100% - 6px);z-index:5;background:#fff;border:1px solid #ccd;border-radius:10px;box-shadow:0 8px 24px #0003;overflow:hidden}
+.sug button{display:flex;gap:10px;align-items:center;width:100%;margin:0;padding:11px 12px;background:#fff;color:#1b1f3a;font-weight:500;border-radius:0;text-align:left;border-top:1px solid #f0f1f6}
+.sug button:first-child{border-top:0}.sug button:active{background:#eef0fa}
+.sug small{margin-left:auto;color:#889;font-weight:400;font-size:13px}
+.hint{color:#778;font-size:14px;margin:0 0 8px}
+.lg{margin-top:10px}.lg b{display:block;font-size:13px;color:#667;margin:0 0 6px;font-weight:600}.lg .lines{margin-top:0}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid #1a2ab0;border-right-color:transparent;border-radius:50%;animation:r .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes r{to{transform:rotate(1turn)}}
 </style></head><body><header><h1>Abfahrtstafel</h1></header><main>)HTML";
 
@@ -125,7 +132,6 @@ const char CONFIG_HTML[] PROGMEM = R"HTML(
 <button type="button" class="sec" id="wr">WLAN ändern</button>
 <button type="button" class="sec danger" id="fr">Werkseinstellungen</button></div>
 <p class="muted" id="ver" style="text-align:center;margin-top:10px"></p></section>
-<datalist id="dl"></datalist>
 <script>
 const $=i=>document.getElementById(i);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -133,15 +139,28 @@ const SCH="https://search.ch/timetable/api/",OD="https://transport.opendata.ch/v
 async function getJ(u,ms){const c=new AbortController(),t=setTimeout(()=>c.abort(),ms||7000);
   try{const r=await fetch(u,{signal:c.signal,cache:'no-store'});if(!r.ok)throw r.status;return await r.json()}finally{clearTimeout(t)}}
 // Fahrplan-Daten: zuerst search.ch, sonst transport.opendata.ch
+const KIND={train:['🚆','Zug'],tram:['🚊','Tram'],bus:['🚌','Bus'],ship:['⛴️','Schiff'],other:['🚡','Bahn']};
+const GROUP={train:'Züge',tram:'Tram',bus:'Bus',ship:'Schiff',other:'Weitere'};
+const typeKind=t=>/train/.test(t)?'train':/tram/.test(t)?'tram':/bus|post/.test(t)?'bus':/ship|boat/.test(t)?'ship':/cable|funi|gondola|chair/.test(t)?'other':'';
+const catKind=c=>/^(T|NFT|TRAM)$/.test(c)?'tram':/^(B|NFB|BUS|KB)$/.test(c)?'bus':/^(BAT|FAE)$/.test(c)?'ship':'train';
+async function schNames(q){
+  return(await getJ(SCH+'completion.json?term='+enc(q))).filter(x=>/sl-icon-type-/.test(x.iconclass||'')&&!/adr|poi/.test(x.iconclass))
+    .map(x=>({n:x.label.trim(),k:typeKind(x.iconclass)}))}
 async function findNames(q){
-  try{return(await getJ(SCH+'completion.json?term='+enc(q))).filter(x=>!/adr|poi/.test(x.iconclass||'')).map(x=>x.label.trim())}catch(e){}
-  try{return((await getJ(OD+'locations?type=station&fields[]=stations/name&query='+enc(q))).stations||[]).map(s=>s.name)}catch(e){}
+  // "Winterthur HB" findet bei search.ch nur Bushaltestellen: Bahnhof "Winterthur" zuerst vorschlagen
+  const m=q.match(/^(.+?)[\s,]+(hb|hbf|hauptbahnhof|bahnhof|bhf|sbb)\.?$/i);
+  try{
+    const[a,b]=await Promise.all([schNames(q),m?schNames(m[1]).catch(()=>[]):[]]);
+    const l=[...b.filter(x=>x.k==='train').slice(0,1),...a];
+    return l.filter((x,i)=>l.findIndex(y=>y.n===x.n)===i);
+  }catch(e){}
+  try{return((await getJ(OD+'locations?type=station&fields[]=stations/name&query='+enc(q))).stations||[]).map(s=>({n:s.name,k:''}))}catch(e){}
   return[]}
 async function findLines(s){
-  try{const r=await getJ(SCH+'stationboard.json?limit=60&stop='+enc(s));
-    if(r.connections)return r.connections.map(e=>({c:e['*G']||'',n:e['*L']||e.line||''}));if(r.messages)return null}catch(e){}
-  try{const r=await getJ(OD+'stationboard?limit=60&fields[]=station/name&fields[]=stationboard/number&fields[]=stationboard/category&station='+enc(s));
-    if(r.station&&r.station.name)return(r.stationboard||[]).map(e=>({c:e.category||'',n:e.number||''}));return null}catch(e){}
+  try{const r=await getJ(SCH+'stationboard.json?limit=80&stop='+enc(s));
+    if(r.connections)return r.connections.map(e=>{const c=e['*G']||'';return{c,n:e['*L']||e.line||'',k:typeKind(e.type||'')||catKind(c)}});if(r.messages)return null}catch(e){}
+  try{const r=await getJ(OD+'stationboard?limit=80&fields[]=station/name&fields[]=stationboard/number&fields[]=stationboard/category&station='+enc(s));
+    if(r.station&&r.station.name)return(r.stationboard||[]).map(e=>({c:e.category||'',n:e.number||'',k:catKind(e.category||'')}));return null}catch(e){}
   return false}
 const PLAIN=['T','B','NFT','NFB','TRAM','BUS',''];
 const PRESETS={
@@ -154,26 +173,37 @@ document.querySelectorAll("#font button").forEach(b=>b.onclick=()=>setFont(b.dat
 
 function upd(){$('add').disabled=$('sts').children.length>=4}
 
-// Vorschläge beim Tippen (Handy fragt den Fahrplan-Server direkt)
+// Vorschläge beim Tippen (Handy fragt den Fahrplan-Server direkt), mit Verkehrsmittel-Symbol
 function suggest(inp){
-  let tm;
+  const box=document.createElement('div');box.className='sug';box.hidden=true;inp.after(box);
+  let tm,seq=0;const close=()=>{box.hidden=true};
   inp.addEventListener('input',()=>{
-    clearTimeout(tm);const q=inp.value.trim();if(q.length<2)return;
+    clearTimeout(tm);const q=inp.value.trim();if(q.length<2){close();return}
     tm=setTimeout(async()=>{
-      const l=await findNames(q);
-      $('dl').innerHTML=l.filter(Boolean).slice(0,8).map(n=>'<option value="'+esc(n)+'">').join('');
-    },350);
+      const my=++seq,l=(await findNames(q)).slice(0,7);
+      if(my!==seq||document.activeElement!==inp)return;
+      box.innerHTML='';
+      for(const x of l){
+        const b=document.createElement('button');b.type='button';
+        b.innerHTML='<span>'+(KIND[x.k]||['📍'])[0]+'</span><span>'+esc(x.n)+'</span>'+(x.k?'<small>'+KIND[x.k][1]+'</small>':'');
+        b.onpointerdown=e=>e.preventDefault();
+        b.onclick=()=>{inp.value=x.n;close();inp.dispatchEvent(new Event('change'));inp.blur()};
+        box.appendChild(b);
+      }
+      box.hidden=!l.length;
+    },300);
   });
+  inp.addEventListener('blur',()=>setTimeout(close,200));
 }
 
 function addSt(st){
   const d=document.createElement('div');d.className='st';
-  d.innerHTML='<div class="row"><div class="seg"><button type="button" data-t="stop">Tram &amp; Bus</button><button type="button" data-t="train">Zug</button></div><button type="button" class="sec x">✕</button></div>'
-   +'<div class="p-stop"><input class="nm" list="dl" placeholder="Haltestelle" autocomplete="off"><div class="lines"></div></div>'
-   +'<div class="p-train"><input class="fr" list="dl" placeholder="Von (z. B. Zürich HB)" autocomplete="off"><input class="to" list="dl" placeholder="Nach (z. B. Winterthur)" autocomplete="off"></div>'
+  d.innerHTML='<div class="row"><div class="seg"><button type="button" data-t="stop">Station</button><button type="button" data-t="train">Verbindung</button></div><button type="button" class="sec x">✕</button></div>'
+   +'<div class="p-stop"><p class="hint">Alle Abfahrten ab einem Bahnhof oder einer Haltestelle: Züge, Trams und Busse.</p><div class="ac"><input class="nm" placeholder="z. B. Zürich HB" autocomplete="off" autocorrect="off" spellcheck="false"></div><div class="lns"></div></div>'
+   +'<div class="p-train"><p class="hint">Nur direkte Verbindungen von A nach B, ohne Umsteigen.</p><div class="ac"><input class="fr" placeholder="Von, z. B. Zürich HB" autocomplete="off" autocorrect="off" spellcheck="false"></div><div class="ac"><input class="to" placeholder="Nach, z. B. Winterthur" autocomplete="off" autocorrect="off" spellcheck="false"></div></div>'
    +'<div class="walk">Fussweg <input class="wk" type="number" min="0" max="60" inputmode="numeric"> min</div><p class="stw" hidden></p>';
   const q=c=>d.querySelector(c);
-  const nm=q('.nm'),ln=q('.lines'),fr=q('.fr'),to=q('.to'),wk=q('.wk'),w=q('.stw');
+  const nm=q('.nm'),ln=q('.lns'),fr=q('.fr'),to=q('.to'),wk=q('.wk'),w=q('.stw');
   d.warn=t=>{w.textContent=t?'⚠ '+t:'';w.hidden=!t};
   let type=st.type==='train'?'train':'stop';
   if(type==='train'){fr.value=st.name||'';to.value=st.to||''}else nm.value=st.name||'';
@@ -199,17 +229,34 @@ function addSt(st){
     if(my!==seq)return;
     const l=[];
     for(const e of r||[])if(e.n&&!l.some(x=>x.n===e.n))l.push(e);
-    for(const x of d.sel)if(!l.some(y=>y.n===x))l.push({c:'',n:x});
-    if(r===null){ln.innerHTML='';d.warn('Nicht gefunden. Bitte den Namen aus der Vorschlagsliste wählen.');return}
-    if(!l.length){ln.innerHTML='<span class="muted">'+(r===false?'Linien können gerade nicht geladen werden. Speichern geht trotzdem (zeigt alle Linien).':'Keine Linien gefunden')+'</span>';return}
+    for(const x of d.sel)if(!l.some(y=>y.n===x))l.push({c:'',n:x,k:'other'});
+    if(r===null){ln.innerHTML='';d.warn('Nicht gefunden. Bitte einen Namen aus der Vorschlagsliste wählen.');return}
+    if(!l.length){ln.innerHTML='<p class="muted">'+(r===false?'Linien können gerade nicht geladen werden. Speichern geht trotzdem (zeigt alle Linien).':'Gerade keine Abfahrten gefunden.')+'</p>';return}
     l.sort((a,b)=>(parseInt(a.n)||999)-(parseInt(b.n)||999)||a.n.localeCompare(b.n));
-    ln.innerHTML='';
-    for(const x of l){
-      const b=document.createElement('button');b.type='button';
-      b.className='chip'+(d.sel.has(x.n)?' on':'');
-      b.textContent=(PLAIN.includes(x.c)?'':x.c+(x.c.length>1?' ':''))+x.n;
-      b.onclick=()=>{d.sel.has(x.n)?d.sel.delete(x.n):d.sel.add(x.n);b.classList.toggle('on')};
-      ln.appendChild(b);
+    ln.innerHTML='<p class="muted" style="margin-top:10px">Nur bestimmte Linien zeigen? Antippen, sonst kommen alle.</p>';
+    for(const k of['train','tram','bus','ship','other']){
+      const g=l.filter(x=>(x.k||'other')===k);if(!g.length)continue;
+      const box=document.createElement('div');box.className='lg';
+      box.innerHTML='<b>'+KIND[k][0]+' '+GROUP[k]+'</b><div class="lines"></div>';
+      for(const x of g){
+        const b=document.createElement('button');b.type='button';
+        b.className='chip'+(d.sel.has(x.n)?' on':'');
+        b.textContent=PLAIN.includes(x.c)||x.n.startsWith(x.c)?x.n:x.c+(x.c.length>1?' ':'')+x.n;
+        b.onclick=()=>{d.sel.has(x.n)?d.sel.delete(x.n):d.sel.add(x.n);b.classList.toggle('on')};
+        box.lastChild.appendChild(b);
+      }
+      ln.appendChild(box);
+    }
+    // Bushaltestelle "…/HB" gewählt, aber Züge gemeint? Bahnhof anbieten
+    const m=!l.some(x=>x.k==='train')&&s.match(/^([^,]+),.*\b(HB|Hbf|Hauptbahnhof|Bahnhof|Bhf)\b/i);
+    if(m){
+      const t=(await schNames(m[1]).catch(()=>[])).find(x=>x.k==='train');
+      if(t&&my===seq){
+        const b=document.createElement('button');b.type='button';b.className='sec';
+        b.textContent='🚆 Züge gesucht? Bahnhof «'+t.n+'» nehmen';
+        b.onclick=()=>{nm.value=t.n;nm.onchange()};
+        ln.prepend(b);
+      }
     }
   }
   q('.x').onclick=()=>{d.remove();upd()};
@@ -248,7 +295,7 @@ $('non').onchange=()=>$('nt').style.display=$('non').checked?'':'none';
 let SAVED=[];
 function showStatus(S){
   if(!S)return;
-  SAVED.forEach((d,i)=>d.warn(S.st[i]==2?'Nicht gefunden. Bitte den Namen aus der Vorschlagsliste wählen.':''));
+  SAVED.forEach((d,i)=>d.warn(S.st[i]==2?'Nicht gefunden. Bitte einen Namen aus der Vorschlagsliste wählen.':''));
   const w=$('warn');
   w.textContent=!S.wifi?'⚠ Die Tafel hat gerade kein WLAN und verbindet sich neu.'
     :S.st.length&&S.st.every(x=>x==3)?'⚠ Der Fahrplan-Server ist gerade nicht erreichbar. Die Tafel versucht es automatisch weiter.':'';
