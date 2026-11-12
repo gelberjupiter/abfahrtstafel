@@ -4,7 +4,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <HTTPUpdate.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
@@ -424,6 +424,7 @@ void statusJson(JsonObject d) {
     if (lastOk[s] > newest) newest = lastOk[s];
   }
   xSemaphoreGive(depMutex);
+  d["upd"] = updErr;
   d["age"] = newest ? (long)(now - newest) : -1L;
   d["wifi"] = WiFi.status() == WL_CONNECTED;
 }
@@ -681,6 +682,57 @@ void clearDepartures() {
   xSemaphoreGive(depMutex);
 }
 
+// Firmware laden und flashen. Eigene Schleife statt HTTPUpdate: dessen Stream::readBytes liest
+// über TLS Byte für Byte (~5 KB/s), hier blockweise.
+bool otaDownload(const char* url) {
+  static uint8_t buf[4096];
+  WiFiClientSecure c;
+  c.setInsecure();
+  c.setHandshakeTimeout(15);
+  HTTPClient h;
+  h.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  h.setConnectTimeout(10000);
+  h.setTimeout(15000);
+  h.useHTTP10(true);  // ohne chunked encoding, Grösse steht im Header
+  if (!h.begin(c, url)) { strcpy(updErr, "Download nicht möglich"); return false; }
+  const int code = h.GET();
+  const int total = h.getSize();
+  if (code != HTTP_CODE_OK || total <= 0) {
+    snprintf(updErr, sizeof updErr, "Download fehlgeschlagen (%d)", code);
+    h.end();
+    return false;
+  }
+  if (!Update.begin(total)) {
+    snprintf(updErr, sizeof updErr, "Kein Platz: %s", Update.errorString());
+    h.end();
+    return false;
+  }
+  WiFiClient* s = h.getStreamPtr();
+  updTotal = total;
+  updStart = millis();
+  int got = 0;
+  for (uint32_t lastData = millis(); got < total;) {
+    const int avail = s->available();
+    if (avail <= 0) {
+      if (millis() - lastData > 20000) break;  // Download steht
+      delay(2);
+      continue;
+    }
+    const int n = s->read(buf, min(avail, min((int)sizeof buf, total - got)));
+    if (n <= 0) continue;
+    if (Update.write(buf, n) != (size_t)n) break;
+    got += n;
+    updCur = got;
+    fetchAlive = lastData = millis();  // Watchdog greift nur, wenn der Download wirklich steht
+  }
+  h.end();
+  if (got == total && Update.end(true)) return true;
+  if (Update.hasError()) snprintf(updErr, sizeof updErr, "Fehler: %s", Update.errorString());
+  else snprintf(updErr, sizeof updErr, "Download abgebrochen bei %d %%", (int)((int64_t)got * 100 / total));
+  Update.abort();
+  return false;
+}
+
 // Neuestes GitHub-Release prüfen (Tag "v<Build>") und bei neuerer Version installieren
 void checkUpdate() {
   if (!*GITHUB_REPO) return;
@@ -688,32 +740,23 @@ void checkUpdate() {
   filter["tag_name"] = true;
   filter["assets"][0]["name"] = true;
   filter["assets"][0]["browser_download_url"] = true;
-  if (getJson(String("https://api.github.com/repos/") + GITHUB_REPO + "/releases/latest", doc, filter) != HTTP_CODE_OK)
-    return;
+  const int code = getJson(String("https://api.github.com/repos/") + GITHUB_REPO + "/releases/latest", doc, filter);
+  if (code != HTTP_CODE_OK) { snprintf(updErr, sizeof updErr, "Prüfung fehlgeschlagen (%d)", code); return; }
   const char* tag = doc["tag_name"] | "";
-  if (*tag != 'v' || atoi(tag + 1) <= FW_BUILD) return;
+  if (*tag != 'v' || atoi(tag + 1) <= FW_BUILD) { snprintf(updErr, sizeof updErr, "aktuell (neuestes Release %s)", tag); return; }
   const char* url = nullptr;
   for (JsonObject a : doc["assets"].as<JsonArray>())
     if (!strcmp(a["name"] | "", "firmware.bin")) url = a["browser_download_url"];
-  if (!url) return;
+  if (!url) { strcpy(updErr, "Release ohne firmware.bin"); return; }
 
   updTo = atoi(tag + 1);
   updCur = updTotal = 0;
   updStart = 0;
   updating = true;
-  WiFiClientSecure c;
-  c.setInsecure();
-  c.setHandshakeTimeout(15);
-  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  httpUpdate.rebootOnUpdate(true);
-  httpUpdate.onProgress([](int cur, int total) {
-    if (!updStart) updStart = millis();
-    updCur = cur;
-    updTotal = total;
-    fetchAlive = millis();  // Watchdog greift nur, wenn der Download wirklich steht
-  });
-  httpUpdate.update(c, url);  // startet bei Erfolg neu
-  strlcpy(updErr, httpUpdate.getLastErrorString().c_str(), sizeof updErr);
+  if (otaDownload(url)) {  // fertig: kurz "startet neu" zeigen
+    delay(1500);
+    ESP.restart();
+  }
   updTotal = -1;  // Fehler kurz anzeigen, nächster Versuch beim nächsten Check
   delay(8000);
   updating = false;
