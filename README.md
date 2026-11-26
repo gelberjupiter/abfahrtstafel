@@ -1,25 +1,28 @@
 # Abfahrtstafel
 
-ÖV-Abfahrtstafel im SBB-Stil für ESP32 + 2.0" ST7789-Display.
+ÖV-Abfahrtstafel im SBB-Stil für ESP32 oder ESP32-S3 + 2.0" ST7789-Display.
 Daten von search.ch, bei Ausfall automatisch von transport.opendata.ch.
 
 ## Updates
 
 Jeder Push auf `main` baut über GitHub Actions eine neue Firmware und veröffentlicht sie als Release (`v<Nummer>`).
+Das Release enthält beide Varianten: `firmware.bin` (ESP32) und `firmware-esp32s3.bin` (ESP32-S3); jede Tafel lädt nur ihre eigene.
 Die Tafel prüft beim Start und alle 30 Minuten, ob es ein neueres Release gibt, und installiert es selbst.
 Während des Updates zeigt sie Fortschritt in Prozent und die geschätzte Restzeit.
 
 ## Verkabelung
 
-| Display | ESP32 |
-|---|---|
-| GND | GND |
-| VCC | 3V3 |
-| SCL | 18 |
-| SDA | 23 |
-| RST | 4 |
-| DC | 16 |
-| CS | 17 |
+| Display | ESP32 | ESP32-S3 |
+|---|---|---|
+| GND | GND | GND |
+| VCC | 3V3 | 3V3 |
+| SCL | 18 | 12 |
+| SDA | 23 | 11 |
+| RST | 4 | 8 |
+| DC | 16 | 9 |
+| CS | 17 | 10 |
+
+Flashen per USB: `pio run -e esp32dev -t upload` bzw. `pio run -e esp32s3 -t upload --upload-port <Port>`.
 
 ## Bedienung
 

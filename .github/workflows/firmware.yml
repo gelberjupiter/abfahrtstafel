@@ -21,11 +21,14 @@ jobs:
           path: ~/.platformio
           key: pio-${{ hashFiles('platformio.ini') }}
       - run: pip install platformio
-      - run: pio run
+      - run: pio run -e esp32dev -e esp32s3
         env:
           PLATFORMIO_BUILD_FLAGS: -D FW_BUILD=${{ github.run_number }}
+      - run: cp .pio/build/esp32s3/firmware.bin firmware-esp32s3.bin
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: Build ${{ github.run_number }}
-          files: .pio/build/esp32dev/firmware.bin
+          files: |
+            .pio/build/esp32dev/firmware.bin
+            firmware-esp32s3.bin

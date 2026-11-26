@@ -26,6 +26,9 @@ static const char* TZ_CH = "CET-1CEST,M3.5.0,M10.5.0/3";
 static const char* SCH = "https://search.ch/timetable/api/";
 static const char* OD = "https://transport.opendata.ch/v1/";
 static const uint32_t UPDATE_INTERVAL_MS = 30UL * 60 * 1000;  // GitHub erlaubt 60 Abfragen/h ohne Login
+#ifndef FW_ASSET
+#define FW_ASSET "firmware.bin"
+#endif
 #ifndef FW_BUILD
 #define FW_BUILD 0
 #endif
@@ -796,8 +799,8 @@ void checkUpdate() {
   if (*tag != 'v' || atoi(tag + 1) <= FW_BUILD) { snprintf(updErr, sizeof updErr, "aktuell (neuestes Release %s)", tag); return; }
   const char* url = nullptr;
   for (JsonObject a : doc["assets"].as<JsonArray>())
-    if (!strcmp(a["name"] | "", "firmware.bin")) url = a["browser_download_url"];
-  if (!url) { strcpy(updErr, "Release ohne firmware.bin"); return; }
+    if (!strcmp(a["name"] | "", FW_ASSET)) url = a["browser_download_url"];
+  if (!url) { strcpy(updErr, "Release ohne " FW_ASSET); return; }
 
   updTo = atoi(tag + 1);
   updCur = updTotal = 0;
