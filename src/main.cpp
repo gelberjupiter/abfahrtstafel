@@ -1,4 +1,5 @@
-// ÖV-Abfahrtstafel – ESP32 + ST7789 (320x240), Daten von transport.opendata.ch
+// ÖV-Abfahrtstafel – ESP32 + ST7789 (320x240) oder ESP32-S3 + ST7735 (160x128),
+// Daten von transport.opendata.ch
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -26,6 +27,19 @@ static const char* TZ_CH = "CET-1CEST,M3.5.0,M10.5.0/3";
 static const char* SCH = "https://search.ch/timetable/api/";
 static const char* OD = "https://transport.opendata.ch/v1/";
 static const uint32_t UPDATE_INTERVAL_MS = 30UL * 60 * 1000;  // GitHub erlaubt 60 Abfragen/h ohne Login
+// Standard-Befehle (MIPI), nicht bei jedem Treiber in TFT_eSPI definiert
+#ifndef TFT_SLPIN
+#define TFT_SLPIN 0x10
+#endif
+#ifndef TFT_SLPOUT
+#define TFT_SLPOUT 0x11
+#endif
+#ifndef TFT_DISPOFF
+#define TFT_DISPOFF 0x28
+#endif
+#ifndef TFT_DISPON
+#define TFT_DISPON 0x29
+#endif
 #ifndef FW_ASSET
 #define FW_ASSET "firmware.bin"
 #endif
@@ -91,8 +105,62 @@ bool pixelFont = false, flapFont = false;
 SemaphoreHandle_t cfgMutex, depMutex;
 Preferences prefs;
 
+#ifdef LCD_HALF
+// Kleines Display (160x128): die Tafel wird wie gewohnt in 320x240 in einen Bildspeicher
+// gezeichnet und geglättet auf die halbe Grösse ausgegeben (nur geänderte Zeilen)
+TFT_eSPI lcd;
+TFT_eSprite tft(&lcd);
+static const int OUT_W = 160, OUT_H = 120;
+uint16_t* outBuf = nullptr;  // was zuletzt auf dem Display steht (Bytes vertauscht wie im Sprite)
+uint16_t outBg = 0;
+
+inline uint16_t swap16(uint16_t c) { return (c >> 8) | (c << 8); }
+
+// Zeilen y0..y0+h des Bildspeichers halbieren und geänderte Zeilen ans Display schicken
+void present(int y0 = 0, int h = 240) {
+  const uint16_t* src = (const uint16_t*)tft.getPointer();
+  if (!src || !outBuf) return;
+  const int r0 = max(0, y0 / 2), r1 = min(OUT_H, (y0 + h + 1) / 2);
+  uint16_t line[OUT_W];
+  int runStart = -1;
+  for (int r = r0; r <= r1; r++) {
+    bool changed = false;
+    if (r < r1) {
+      const uint16_t* a = src + (2 * r) * 320;
+      const uint16_t* b = a + 320;
+      for (int x = 0; x < OUT_W; x++) {
+        const uint16_t p[4] = {swap16(a[2 * x]), swap16(a[2 * x + 1]), swap16(b[2 * x]), swap16(b[2 * x + 1])};
+        int rs = 2, gs = 2, bs = 2;
+        for (uint16_t v : p) { rs += v >> 11; gs += (v >> 5) & 0x3F; bs += v & 0x1F; }
+        line[x] = swap16(((rs >> 2) << 11) | ((gs >> 2) << 5) | (bs >> 2));
+      }
+      uint16_t* dst = outBuf + r * OUT_W;
+      if (memcmp(dst, line, sizeof line)) { memcpy(dst, line, sizeof line); changed = true; }
+    }
+    if (changed && runStart < 0) runStart = r;
+    if (!changed && runStart >= 0) {
+      lcd.setSwapBytes(false);
+      lcd.pushImage(0, runStart, OUT_W, r - runStart, outBuf + runStart * OUT_W);
+      runStart = -1;
+    }
+  }
+}
+#else
 TFT_eSPI tft;
+TFT_eSPI& lcd = tft;
+inline void present(int = 0, int = 0) {}
+#endif
 TFT_eSprite row(&tft), hdr(&tft), badgeSpr(&tft);
+
+// Sprite an seine Stelle bringen (beim kleinen Display in den Bildspeicher, dann ausgeben)
+void put(TFT_eSprite& s, int x, int y) {
+#ifdef LCD_HALF
+  s.pushToSprite(&tft, x, y);
+  present(y, s.height());
+#else
+  s.pushSprite(x, y);
+#endif
+}
 WebServer server(80);
 DNSServer dns;
 TaskHandle_t fetchHandle = nullptr;
@@ -1084,7 +1152,7 @@ void drawTitleBar(const char* title) {
   hdr.fillSprite(C_HDR);
   dotGrid(hdr, HEADER_H, 1, C_HDR);
   drawLabel(hdr, title, 8, HDR_BASE, 304, C_WHITE);
-  hdr.pushSprite(0, 0);
+  put(hdr, 0, 0);
 }
 
 // Kopfzeile nur bei Änderung (Titel, Minute, Status); der blinkende Doppelpunkt direkt aufs Display
@@ -1108,7 +1176,7 @@ void drawHeader(const tm& t, bool colon, bool stale) {
         txtDraw(hdr, mm, CLOCK_X + 4, HDR_BASE, BIG, C_WHITE);
       }
       if (stale) hdr.fillCircle(flapFont ? 234 : 240, HEADER_H / 2, 4, C_YELLOW);
-      hdr.pushSprite(0, 0);
+      put(hdr, 0, 0);
     };
     if (flapFont && (strcmp(hh, prevClock[0]) || strcmp(mm, prevClock[1]))) {
       char ah[4], am[4], bh[4], bm[4];
@@ -1155,7 +1223,7 @@ void drawMessageRow(int r, const char* msg) {
   beginRow();
   if (flapFont && *msg) flapModule(row, DEST_X - 5, 3, MIN_RIGHT - DEST_X + 5, msg, "", 0, DEST_X, BASE, 248, C_LABEL);
   else drawLabel(row, msg, DEST_X, BASE, 250, C_LABEL);
-  row.pushSprite(0, rowY(r));
+  put(row, 0, rowY(r));
 }
 
 void drawRow(int r, const Departure* d, time_t now, bool blink) {
@@ -1237,7 +1305,7 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       else
         drawLabel(row, d->dest, destX, BASE, right - destX, C_WHITE);
     }
-    row.pushSprite(0, rowY(r));
+    put(row, 0, rowY(r));
   };
   if (flapFont && d && (forced || strcmp(prevDest[r], d->dest) || strcmp(prevMin[r], buf))) {
     // Zwischenblätter: Ziele der anderen Zeilen (wie gedruckte Ortsnamen), Ziffern zählen hoch
@@ -1329,7 +1397,11 @@ void drawQR(const char* text, int x, int y, int maxSize) {
   while (ver <= 7 && CAP[ver] < len) ver++;
   if (ver > 7) return;
   qrcode_initText(&qr, buf, ver, ECC_LOW, text);
-  int scale = maxSize / (qr.size + 4), total = scale * (qr.size + 4);
+  int scale = maxSize / (qr.size + 4);
+#ifdef LCD_HALF
+  scale = max(2, scale & ~1);  // gerade, damit die Module nach dem Halbieren scharf bleiben
+#endif
+  const int total = scale * (qr.size + 4);
   tft.fillRect(x, y, total, total, TFT_WHITE);
   for (int qy = 0; qy < qr.size; qy++)
     for (int qx = 0; qx < qr.size; qx++)
@@ -1362,6 +1434,7 @@ void showInfo(uint32_t ms) {
   drawTitleBar(title);
   invalidate();
   drawMessageRow(0, "Starte neu...");
+  present();
   delay(1500);
   ESP.restart();
   for (;;) {}
@@ -1582,6 +1655,7 @@ bool wrongPassword(uint8_t r) {
         drawQrScreen(errTitle ? errTitle : hadWifi ? "WLAN nicht erreichbar" : "WLAN einrichten", wifiQr,
                      {"1. Code mit der", "Handy-Kamera", "scannen", "2. Dein WLAN", "auswählen"}, footer);
       }
+      present();
     }
     delay(5);
   }
@@ -1624,6 +1698,13 @@ void setupWeb() {
 }
 
 // ===================== Setup / Loop =====================
+// Hintergrundbeleuchtung (nur wenn BLK an einem GPIO hängt): nachts ganz aus
+void backlight(bool on) {
+#ifdef TFT_BL
+  digitalWrite(TFT_BL, on ? TFT_BACKLIGHT_ON : !TFT_BACKLIGHT_ON);
+#endif
+}
+
 bool nightAt(const tm& t) {
   int mins = t.tm_hour * 60 + t.tm_min;
   return nightOn && nightFrom != nightTo &&
@@ -1637,8 +1718,17 @@ void setup() {
   prefs.begin("tafel", false);
   loadConfig();
 
-  tft.init();
-  tft.setRotation(1);
+  lcd.init();
+  lcd.setRotation(1);
+#ifdef LCD_HALF
+  lcd.fillScreen(TFT_BLACK);
+  tft.setColorDepth(16);
+  tft.createSprite(320, 240);
+  outBuf = (uint16_t*)calloc(OUT_W * OUT_H, sizeof(uint16_t));
+  Serial.begin(115200);
+  Serial.printf("Abfahrtstafel %d: PSRAM %u KB, Bildspeicher %s\n", FW_BUILD, ESP.getPsramSize() / 1024,
+                tft.getPointer() && outBuf ? "ok" : "FEHLT");
+#endif
   tft.setTextWrap(false, false);
   tft.setAttribute(UTF8_SWITCH, 0);
   tft.fillScreen(C_BG);
@@ -1695,6 +1785,12 @@ void loop() {
   server.handleClient();
   handleButton();
   watchdog();
+#ifdef LCD_HALF
+  // unterer Rand (8 Zeilen unter dem halbierten Bild) in Hintergrundfarbe
+  if (outBg != C_BG && !nightNow) { outBg = C_BG; lcd.fillRect(0, OUT_H, OUT_W, 128 - OUT_H, C_BG); }
+  static uint32_t lastPresent = 0;
+  if (!nightNow && millis() - lastPresent >= 50) { lastPresent = millis(); present(); }
+#endif
 
   static int updShown = -3;  // -3 = nicht sichtbar
   if (updating) {
@@ -1732,12 +1828,15 @@ bool tick() {
     nightNow = dark;
     if (dark) {
       tft.fillScreen(TFT_BLACK);
-      tft.writecommand(TFT_DISPOFF);
-      tft.writecommand(TFT_SLPIN);
+      present();
+      backlight(false);
+      lcd.writecommand(TFT_DISPOFF);
+      lcd.writecommand(TFT_SLPIN);
     } else {
-      tft.writecommand(TFT_SLPOUT);
+      lcd.writecommand(TFT_SLPOUT);
       delay(120);
-      tft.writecommand(TFT_DISPON);
+      lcd.writecommand(TFT_DISPON);
+      backlight(true);
       serverSeen = millis();
       if (fetchHandle) xTaskNotifyGive(fetchHandle);
     }

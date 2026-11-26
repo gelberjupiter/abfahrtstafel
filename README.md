@@ -1,6 +1,6 @@
 # Abfahrtstafel
 
-ÖV-Abfahrtstafel im SBB-Stil für ESP32 oder ESP32-S3 + 2.0" ST7789-Display.
+ÖV-Abfahrtstafel im SBB-Stil für ESP32 + 2.0" ST7789-Display (320x240) oder ESP32-S3 + 1.8" ST7735-Display (160x128).
 Daten von search.ch, bei Ausfall automatisch von transport.opendata.ch.
 
 ## Updates
@@ -12,7 +12,7 @@ Während des Updates zeigt sie Fortschritt in Prozent und die geschätzte Restze
 
 ## Verkabelung
 
-| Display | ESP32 | ESP32-S3 |
+| Display | ESP32 (2.0" ST7789) | ESP32-S3 (1.8" ST7735) |
 |---|---|---|
 | GND | GND | GND |
 | VCC | 3V3 | 3V3 |
@@ -21,6 +21,9 @@ Während des Updates zeigt sie Fortschritt in Prozent und die geschätzte Restze
 | RST | 4 | 8 |
 | DC | 16 | 9 |
 | CS | 17 | 10 |
+| BLK | – | 13 (nachts aus) |
+
+Auf dem S3 zeichnet die Tafel in 320x240 und gibt das Bild geglättet halbiert aus (160x120).
 
 Flashen per USB: `pio run -e esp32dev -t upload` bzw. `pio run -e esp32s3 -t upload --upload-port <Port>`.
 
