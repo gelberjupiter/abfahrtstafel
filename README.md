@@ -23,7 +23,7 @@ Während des Updates zeigt sie Fortschritt in Prozent und die geschätzte Restze
 | CS | 17 | 10 |
 | BLK | – | 13 (nachts aus) |
 
-Auf dem S3 zeichnet die Tafel in 320x240 und gibt das Bild geglättet halbiert aus (160x120).
+Auf dem S3 hat die Tafel ein eigenes Layout für 160x128: 5 Zeilen, Source Sans 15/13 px (Fallblatt: Oswald 17 px).
 
 Flashen per USB: `pio run -e esp32dev -t upload` bzw. `pio run -e esp32s3 -t upload --upload-port <Port>`.
 

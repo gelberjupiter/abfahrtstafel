@@ -14,9 +14,16 @@
 #include <TFT_eSPI.h>
 #include <qrcode.h>
 #include <time.h>
+#ifdef LCD_SMALL
+#include "SourceSansBold15.h"
+#include "SourceSansBold13.h"
+#include "SourceSansBold11.h"
+#include "OswaldFlap17.h"
+#else
 #include "SourceSansBold26.h"
 #include "SourceSansBold19.h"
 #include "OswaldFlap24.h"
+#endif
 #include "web.h"
 
 static const char* HOSTNAME = "abfahrtstafel";
@@ -53,9 +60,42 @@ static const uint32_t UPDATE_INTERVAL_MS = 30UL * 60 * 1000;  // GitHub erlaubt 
 static const char* DEFAULT_CFG = R"({"title":"Abfahrten","stations":[
 {"name":"Zürich, Helvetiaplatz","lines":"8"},{"name":"Zürich, Militär-/Langstrasse","lines":"31,32"}]})";
 
+// ===================== Masse =====================
+#ifdef LCD_SMALL
+// 1.8" ST7735, 160x128 quer: 5 Zeilen, kleinere Schriften, engere Abstände
+static const int SCREEN_W = 160, HEADER_H = 18, ROW_H = 22, MAX_ROWS = 5, BASE = 16;
+static const int BADGE_H = 15, DEST_X = 30, MIN_RIGHT = 157, CLOCK_X = 139, HDR_BASE = 14;
+static const int PAD_X = 4, TITLE_W = 104, CLK_GAP = 3, COL_GAP = 4;
+static const int BADGE_X = 3, BADGE_MIN = 21, BADGE_MAX = 27, BADGE_PAD = 6, BADGE_R = 2, BADGE_TXT = 4;
+static const int ITAL_W = 40, ITAL_H = 16, ITAL_BASE = 12;
+static const int FLAP_W = 9, FLAP_P = 10, FLAP_H = 18, FLAP_TOP = 2, FLAP_PADX = 3, HDR_FLAP_TOP = 0;
+static const int DOT_P = 2, PIX_DEST_MAX = 48, STALE_DX = 26, STALE_DX_FLAP = 28, STALE_R = 2;
+static const int COLON_S = 2, COLON_Y1 = 9, COLON_Y2 = 4;
+static const int MSG_X = PAD_X;
+// Textbildschirme, Update, QR
+static const int TXT_X = 6, TXT_Y = 40, TXT_STEP = 17;
+static const int UPD_BY = 44, UPD_BH = 10, UPD_CLR_Y = 58, UPD_CLR_H = 56, UPD_L1 = 76, UPD_L2 = 92,
+                 UPD_PCT = 80, UPD_INFO = 98, UPD_FOOT = 124;
+static const int QR_X = 2, QR_Y = 20, QR_SIZE = 92, QR_TXT_X = 98, QR_TXT_Y = 34, QR_TXT_STEP = 14, QR_FOOT_Y = 125;
+static constexpr bool SMALL_LCD = true;
+#else
 static const int SCREEN_W = 320, HEADER_H = 40, ROW_H = 33, MAX_ROWS = 6, BASE = 24;
-static const int MAX_DEPS = 8, MAX_ST = 4;
 static const int BADGE_H = 22, DEST_X = 62, MIN_RIGHT = 314, CLOCK_X = 282, HDR_BASE = 28;
+static const int PAD_X = 8, TITLE_W = 220, CLK_GAP = 4, COL_GAP = 10;
+static const int BADGE_X = 6, BADGE_MIN = 42, BADGE_MAX = 50, BADGE_PAD = 12, BADGE_R = 3, BADGE_TXT = 6;
+static const int ITAL_W = 64, ITAL_H = 24, ITAL_BASE = 18;
+static const int FLAP_W = 15, FLAP_P = 17, FLAP_H = 27, FLAP_TOP = 3, FLAP_PADX = 5, HDR_FLAP_TOP = HDR_BASE - 22;
+static const int DOT_P = 3, PIX_DEST_MAX = 84, STALE_DX = 42, STALE_DX_FLAP = 48, STALE_R = 4;
+static const int COLON_S = 3, COLON_Y1 = 14, COLON_Y2 = 6;
+static const int MSG_X = DEST_X;
+static const int TXT_X = 14, TXT_Y = 84, TXT_STEP = 28;
+static const int UPD_BY = 104, UPD_BH = 22, UPD_CLR_Y = 140, UPD_CLR_H = 64, UPD_L1 = 166, UPD_L2 = 192,
+                 UPD_PCT = 170, UPD_INFO = 196, UPD_FOOT = 226;
+static const int QR_X = 8, QR_Y = 46, QR_SIZE = 170, QR_TXT_X = 190, QR_TXT_Y = 70, QR_TXT_STEP = 24, QR_FOOT_Y = 220;
+static constexpr bool SMALL_LCD = false;
+#endif
+static const int SCREEN_H = SCREEN_W * 3 / 4;
+static const int MAX_DEPS = 8, MAX_ST = 4;
 
 constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
   return uint16_t(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
@@ -105,62 +145,8 @@ bool pixelFont = false, flapFont = false;
 SemaphoreHandle_t cfgMutex, depMutex;
 Preferences prefs;
 
-#ifdef LCD_HALF
-// Kleines Display (160x128): die Tafel wird wie gewohnt in 320x240 in einen Bildspeicher
-// gezeichnet und geglättet auf die halbe Grösse ausgegeben (nur geänderte Zeilen)
-TFT_eSPI lcd;
-TFT_eSprite tft(&lcd);
-static const int OUT_W = 160, OUT_H = 120;
-uint16_t* outBuf = nullptr;  // was zuletzt auf dem Display steht (Bytes vertauscht wie im Sprite)
-uint16_t outBg = 0;
-
-inline uint16_t swap16(uint16_t c) { return (c >> 8) | (c << 8); }
-
-// Zeilen y0..y0+h des Bildspeichers halbieren und geänderte Zeilen ans Display schicken
-void present(int y0 = 0, int h = 240) {
-  const uint16_t* src = (const uint16_t*)tft.getPointer();
-  if (!src || !outBuf) return;
-  const int r0 = max(0, y0 / 2), r1 = min(OUT_H, (y0 + h + 1) / 2);
-  uint16_t line[OUT_W];
-  int runStart = -1;
-  for (int r = r0; r <= r1; r++) {
-    bool changed = false;
-    if (r < r1) {
-      const uint16_t* a = src + (2 * r) * 320;
-      const uint16_t* b = a + 320;
-      for (int x = 0; x < OUT_W; x++) {
-        const uint16_t p[4] = {swap16(a[2 * x]), swap16(a[2 * x + 1]), swap16(b[2 * x]), swap16(b[2 * x + 1])};
-        int rs = 2, gs = 2, bs = 2;
-        for (uint16_t v : p) { rs += v >> 11; gs += (v >> 5) & 0x3F; bs += v & 0x1F; }
-        line[x] = swap16(((rs >> 2) << 11) | ((gs >> 2) << 5) | (bs >> 2));
-      }
-      uint16_t* dst = outBuf + r * OUT_W;
-      if (memcmp(dst, line, sizeof line)) { memcpy(dst, line, sizeof line); changed = true; }
-    }
-    if (changed && runStart < 0) runStart = r;
-    if (!changed && runStart >= 0) {
-      lcd.setSwapBytes(false);
-      lcd.pushImage(0, runStart, OUT_W, r - runStart, outBuf + runStart * OUT_W);
-      runStart = -1;
-    }
-  }
-}
-#else
 TFT_eSPI tft;
-TFT_eSPI& lcd = tft;
-inline void present(int = 0, int = 0) {}
-#endif
 TFT_eSprite row(&tft), hdr(&tft), badgeSpr(&tft);
-
-// Sprite an seine Stelle bringen (beim kleinen Display in den Bildspeicher, dann ausgeben)
-void put(TFT_eSprite& s, int x, int y) {
-#ifdef LCD_HALF
-  s.pushToSprite(&tft, x, y);
-  present(y, s.height());
-#else
-  s.pushSprite(x, y);
-#endif
-}
 WebServer server(80);
 DNSServer dns;
 TaskHandle_t fetchHandle = nullptr;
@@ -199,7 +185,7 @@ bool bottomDirty = true;
 
 char prevDest[MAX_ROWS][48], prevMin[MAX_ROWS][8], prevClock[2][4];
 uint8_t flapForce = 0;  // Zeilen, die ohne Änderung umklappen sollen
-int pixDestX = 62;       // LED: Zielspalte rückt nach rechts, wenn eine Linie (z. B. RE37) mehr Platz braucht
+int pixDestX = DEST_X;       // LED: Zielspalte rückt nach rechts, wenn eine Linie (z. B. RE37) mehr Platz braucht
 bool flapPlat = false;   // Fallblatt: Gleisspalte in allen Zeilen, sobald eine Abfahrt ein Gleis hat
 void invalidate() {
   memset(rowSig, 0, sizeof rowSig);
@@ -298,7 +284,7 @@ inline const uint8_t* glyph(uint8_t c, int& first, int& last) {
   return g;
 }
 
-inline int dotPitch(int size) { return size == BIG ? 3 : 2; }
+inline int dotPitch(int size) { return size == BIG ? DOT_P : DOT_P - 1; }
 
 int dotWidth(const char* s, int size) {
   int w = 0, f, l;
@@ -307,8 +293,8 @@ int dotWidth(const char* s, int size) {
 }
 
 void dotDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t color) {
-  const int p = dotPitch(size), top = baseline - 7 * p;
-  if (size == BIG) x -= x % 3;  // aufs Punkteraster
+  const int p = dotPitch(size), top = baseline - 7 * p, ds = p > 1 ? 2 : 1;
+  if (size == BIG) x -= x % DOT_P;  // aufs Punkteraster
   else g.fillRect(x - 1, top - 1, dotWidth(s, size) + 3, 7 * p + 1, C_BG);
   int f, l;
   for (; *s; s++) {
@@ -316,7 +302,7 @@ void dotDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t
     for (int cx = f; cx <= l; cx++) {
       uint8_t bits = pgm_read_byte(gl + cx);
       for (int ry = 0; bits; ry++, bits >>= 1)
-        if (bits & 1) g.fillRect(x + (cx - f) * p, top + ry * p, 2, 2, color);
+        if (bits & 1) g.fillRect(x + (cx - f) * p, top + ry * p, ds, ds, color);
     }
     x += (l - f + 2) * p;
   }
@@ -346,20 +332,20 @@ const NarrowGlyph* narrowGlyph(char c) {
 int narrowWidth(const char* s) {
   int w = 0;
   for (; *s; s++) { auto gl = narrowGlyph(*s); w += (gl ? gl->w : 3) + 1; }
-  return w ? (w - 1) * 3 - 1 : 0;
+  return w ? (w - 1) * DOT_P - 1 : 0;
 }
 
 // gleiche Höhe und gleiches Raster wie die grosse Punktschrift, nur schmaler
 void narrowDraw(TFT_eSPI& g, const char* s, int x, int baseline, uint16_t color) {
-  const int top = baseline - 21;
-  x -= x % 3;
+  const int top = baseline - 7 * DOT_P;
+  x -= x % DOT_P;
   for (; *s; s++) {
     auto gl = narrowGlyph(*s);
     const int w = gl ? gl->w : 3;
     for (int cx = 0; gl && cx < w; cx++)
       for (int ry = 0, bits = gl->col[cx]; bits; ry++, bits >>= 1)
-        if (bits & 1) g.fillRect(x + cx * 3, top + ry * 3, 2, 2, color);
-    x += (w + 1) * 3;
+        if (bits & 1) g.fillRect(x + cx * DOT_P, top + ry * DOT_P, 2, 2, color);
+    x += (w + 1) * DOT_P;
   }
 }
 
@@ -368,16 +354,22 @@ inline bool usesDots(int size) { return pixelFont && size <= SMALL; }
 inline uint16_t dimDot(uint16_t bg) { return tft.alphaBlend(40, C_WHITE, bg); }
 
 void dotGrid(TFT_eSPI& g, int h, int yOff, uint16_t bg) {
-  if (!pixelFont) return;
+  if (!pixelFont || DOT_P < 3) return;  // auf dem kleinen Display ohne Hintergrundraster
   const uint16_t c = dimDot(bg);
   for (int y = yOff; y + 2 <= h; y += 3)
     for (int x = 0; x + 2 <= SCREEN_W; x += 3) g.fillRect(x, y, 2, 2, c);
 }
 
 void setFont(TFT_eSPI& g, int size) {
+#ifdef LCD_SMALL
+  if (size == UI2) g.setFreeFont(&SourceSansBold11);
+  else if (size == BIG) g.setFreeFont(flapFont ? &OswaldFlap17 : &SourceSansBold15);
+  else g.setFreeFont(&SourceSansBold13);
+#else
   if (size == UI2) g.setTextFont(2);
   else if (size == BIG) g.setFreeFont(flapFont ? &OswaldFlap24 : &SourceSansBold26);
   else g.setFreeFont(&SourceSansBold19);
+#endif
 }
 
 int txtWidth(TFT_eSPI& g, const char* s, int size) {
@@ -931,14 +923,16 @@ const uint16_t PIX_BUS[8]   = {0x0FE, 0x1FF, 0x125, 0x125, 0x1FF, 0x1FF, 0x0C6, 
 const uint16_t PIX_TRAM[8]  = {0x07C, 0x010, 0x1FF, 0x155, 0x1FF, 0x1FF, 0x082, 0x1FF};
 const uint16_t PIX_TRAIN[8] = {0x0FC, 0x1B6, 0x1FF, 0x1FF, 0x101, 0x1FF, 0x092, 0x1FF};
 const uint16_t PIX_BOAT[8]  = {0x010, 0x038, 0x07C, 0x1FF, 0x0FE, 0x07C, 0x000, 0x155};
-static const int PIX_VEH_W = 27, VEH_W = 26;
+static const int PIX_VEH_W = 9 * DOT_P, VEH_W = SMALL_LCD ? 9 * DOT_P : 26;
 
 const uint16_t* pixVehicle(const char* cat) {
   return isBus(cat) ? PIX_BUS : isTram(cat) ? PIX_TRAM : isBoat(cat) ? PIX_BOAT : PIX_TRAIN;
 }
 
 // Abfahrt jetzt (Normal-Schrift): Bus, Tram, Zug oder Schiff als flaches Symbol
+void drawPixelVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c);
 void drawVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c) {
+  if (SMALL_LCD) { drawPixelVehicle(g, xRight, cy, cat, c); return; }  // klein: Pixel-Symbol ist deutlicher
   const int w = 26, h = 14, x = xRight - w, y = cy - h / 2 - 2;
   if (isBoat(cat)) {
     g.fillRect(x + 9, y + 1, 9, 6, c);
@@ -978,10 +972,10 @@ void drawVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c) {
 
 void drawPixelVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t c) {
   const uint16_t* bm = pixVehicle(cat);
-  const int x0 = (xRight - PIX_VEH_W) / 3 * 3, y0 = cy - 13;
+  const int x0 = (xRight - PIX_VEH_W) / DOT_P * DOT_P, y0 = cy - 4 * DOT_P - 1;
   for (int ry = 0; ry < 8; ry++)
     for (int cx = 0; cx < 9; cx++)
-      if (bm[ry] & (1 << (8 - cx))) g.fillRect(x0 + cx * 3, y0 + ry * 3, 2, 2, c);
+      if (bm[ry] & (1 << (8 - cx))) g.fillRect(x0 + cx * DOT_P, y0 + ry * DOT_P, 2, 2, c);
 }
 
 // Kursiv wie die SBB-Zugsignete: Text ins Hilfs-Sprite, dann zeilenweise versetzt kopieren
@@ -989,7 +983,7 @@ void drawItalic(TFT_eSPI& g, const char* txt, int cx, int cy, uint16_t color) {
   const int H = badgeSpr.height(), W = badgeSpr.width();
   int w = min(txtWidth(badgeSpr, txt, SMALL), W);
   badgeSpr.fillSprite(TFT_BLACK);
-  txtDraw(badgeSpr, txt, 0, pixelFont ? 19 : 18, SMALL, TFT_WHITE);
+  txtDraw(badgeSpr, txt, 0, ITAL_BASE + (pixelFont ? 1 : 0), SMALL, TFT_WHITE);
   int x0 = cx - w / 2 - 2, y0 = cy - H / 2;
   for (int y = 0; y < H; y++) {
     int shift = (H - 1 - y) / 4;
@@ -1032,11 +1026,11 @@ int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
 
   if (tram || bus || boat) {
     const char* label = d.line[0] ? d.line : cat;
-    const int w = 42;
+    const int w = max(BADGE_MIN, SMALL_LCD ? txtWidth(g, label, SMALL) + BADGE_PAD : 0);
     uint16_t bg = tram ? tramColor(d.line) : boat ? rgb(0x00, 0x9E, 0xE0) : TFT_WHITE;
-    g.fillRoundRect(x, y, w, BADGE_H, 3, bg);
-    if (lum565(bg) < 50) g.drawRoundRect(x, y, w, BADGE_H, 3, TFT_WHITE);
-    txtDraw(g, label, x + (w - txtWidth(g, label, SMALL)) / 2, cy + 6, SMALL,
+    g.fillRoundRect(x, y, w, BADGE_H, BADGE_R, bg);
+    if (lum565(bg) < 50) g.drawRoundRect(x, y, w, BADGE_H, BADGE_R, TFT_WHITE);
+    txtDraw(g, label, x + (w - txtWidth(g, label, SMALL)) / 2, cy + BADGE_TXT, SMALL,
             lum565(bg) > 150 ? TFT_BLACK : TFT_WHITE);
     return w;
   }
@@ -1044,8 +1038,8 @@ int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
   bool sbahn = isCat(cat, {"S", "SN"}), regio = isCat(cat, {"RE", "R", "REX"});
   char label[16];
   snprintf(label, sizeof label, (sbahn || !*num) ? "%s%s" : "%s %s", cat, num);
-  if (txtWidth(g, label, SMALL) + 12 > 50) snprintf(label, sizeof label, "%s%s", cat, num);  // "RE37" statt "RE 37"
-  int w = constrain(txtWidth(g, label, SMALL) + 12, 42, 50);
+  if (txtWidth(g, label, SMALL) + BADGE_PAD > BADGE_MAX) snprintf(label, sizeof label, "%s%s", cat, num);  // "RE37" statt "RE 37"
+  int w = constrain(txtWidth(g, label, SMALL) + BADGE_PAD, BADGE_MIN, BADGE_MAX);
   uint16_t bg = (sbahn || regio) ? TFT_WHITE : C_RED;
   uint16_t fg = sbahn ? TFT_BLACK : regio ? C_RED : TFT_WHITE;
   uint16_t border = sbahn ? TFT_BLACK : C_RED;
@@ -1059,7 +1053,6 @@ int drawBadge(TFT_eSPI& g, const Departure& d, int x, int cy) {
 // ===================== Fallblatt =====================
 // Ziel auf einem breiten Modul (wie die gedruckten Ortsnamen der SBB-Tafeln), Ziffern einzeln.
 // stage 0 = steht, 1/2 = obere Hälfte schon neu, untere noch alt (Blatt fällt)
-static const int FLAP_W = 15, FLAP_P = 17, FLAP_H = 27;
 
 uint16_t flapColor() { return lum565(C_BG) < 40 ? rgb(44, 44, 48) : tft.alphaBlend(90, C_BG, TFT_BLACK); }
 
@@ -1151,8 +1144,8 @@ void rattleDigits(char* out, const char* s, const char* old, int k) {
 void drawTitleBar(const char* title) {
   hdr.fillSprite(C_HDR);
   dotGrid(hdr, HEADER_H, 1, C_HDR);
-  drawLabel(hdr, title, 8, HDR_BASE, 304, C_WHITE);
-  put(hdr, 0, 0);
+  drawLabel(hdr, title, PAD_X, HDR_BASE, SCREEN_W - 2 * PAD_X, C_WHITE);
+  hdr.pushSprite(0, 0);
 }
 
 // Kopfzeile nur bei Änderung (Titel, Minute, Status); der blinkende Doppelpunkt direkt aufs Display
@@ -1167,16 +1160,16 @@ void drawHeader(const tm& t, bool colon, bool stale) {
     auto render = [&](int stage, const char* h, const char* oh, const char* m, const char* om) {
       hdr.fillSprite(C_HDR);
       dotGrid(hdr, HEADER_H, 1, C_HDR);
-      drawLabel(hdr, cfgTitle.c_str(), 8, HDR_BASE, 220, C_WHITE);
+      drawLabel(hdr, cfgTitle.c_str(), PAD_X, HDR_BASE, TITLE_W, C_WHITE);
       if (flapFont) {
-        flapChars(hdr, h, oh, CLOCK_X - 4 - flapCharsWidth(hdr, h), HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
-        flapChars(hdr, m, om, CLOCK_X + 4, HDR_BASE - 22, HDR_BASE, C_WHITE, stage);
+        flapChars(hdr, h, oh, CLOCK_X - CLK_GAP - flapCharsWidth(hdr, h), HDR_FLAP_TOP, HDR_BASE, C_WHITE, stage);
+        flapChars(hdr, m, om, CLOCK_X + CLK_GAP, HDR_FLAP_TOP, HDR_BASE, C_WHITE, stage);
       } else {
-        txtDraw(hdr, hh, CLOCK_X - 4 - txtWidth(hdr, hh, BIG), HDR_BASE, BIG, C_WHITE);
-        txtDraw(hdr, mm, CLOCK_X + 4, HDR_BASE, BIG, C_WHITE);
+        txtDraw(hdr, hh, CLOCK_X - CLK_GAP - txtWidth(hdr, hh, BIG), HDR_BASE, BIG, C_WHITE);
+        txtDraw(hdr, mm, CLOCK_X + CLK_GAP, HDR_BASE, BIG, C_WHITE);
       }
-      if (stale) hdr.fillCircle(flapFont ? 234 : 240, HEADER_H / 2, 4, C_YELLOW);
-      put(hdr, 0, 0);
+      if (stale) hdr.fillCircle(CLOCK_X - (flapFont ? STALE_DX_FLAP : STALE_DX), HEADER_H / 2, STALE_R, C_YELLOW);
+      hdr.pushSprite(0, 0);
     };
     if (flapFont && (strcmp(hh, prevClock[0]) || strcmp(mm, prevClock[1]))) {
       char ah[4], am[4], bh[4], bm[4];
@@ -1195,10 +1188,10 @@ void drawHeader(const tm& t, bool colon, bool stale) {
     strcpy(prevClock[0], hh);
     strcpy(prevClock[1], mm);
   }
-  const int s = pixelFont ? 2 : 3, x = pixelFont ? CLOCK_X : CLOCK_X - 1;
-  const uint16_t c = colon ? C_WHITE : pixelFont ? dimDot(C_HDR) : C_HDR;
-  tft.fillRect(x, HDR_BASE - (pixelFont ? 15 : 14), s, s, c);
-  tft.fillRect(x, HDR_BASE - 6, s, s, c);
+  const int s = pixelFont ? 2 : COLON_S, x = pixelFont ? CLOCK_X : CLOCK_X - 1;
+  const uint16_t c = colon ? C_WHITE : pixelFont && DOT_P >= 3 ? dimDot(C_HDR) : C_HDR;
+  tft.fillRect(x, HDR_BASE - COLON_Y1 - (pixelFont ? 1 : 0), s, s, c);
+  tft.fillRect(x, HDR_BASE - COLON_Y2, s, s, c);
 }
 
 inline int rowY(int r) { return HEADER_H + r * ROW_H; }
@@ -1221,9 +1214,11 @@ void drawMessageRow(int r, const char* msg) {
   if (sig == rowSig[r]) return;
   rowSig[r] = sig;
   beginRow();
-  if (flapFont && *msg) flapModule(row, DEST_X - 5, 3, MIN_RIGHT - DEST_X + 5, msg, "", 0, DEST_X, BASE, 248, C_LABEL);
-  else drawLabel(row, msg, DEST_X, BASE, 250, C_LABEL);
-  put(row, 0, rowY(r));
+  if (flapFont && *msg)
+    flapModule(row, MSG_X - FLAP_PADX, FLAP_TOP, MIN_RIGHT - MSG_X + FLAP_PADX, msg, "", 0, MSG_X, BASE,
+               MIN_RIGHT - MSG_X - 4, C_LABEL);
+  else drawLabel(row, msg, MSG_X, BASE, MIN_RIGHT - MSG_X - 2, C_LABEL);
+  row.pushSprite(0, rowY(r));
 }
 
 void drawRow(int r, const Departure* d, time_t now, bool blink) {
@@ -1256,56 +1251,56 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
   auto render = [&](int stage, const char* nd, const char* od, const char* nm, const char* om, const char* icat) {
     beginRow();
     if (d) {
-      int bw = drawBadge(row, *d, 6, ROW_H / 2);
-      if (flapFont) row.drawFastHLine(6, ROW_H / 2, bw, TFT_BLACK);
+      int bw = drawBadge(row, *d, BADGE_X, ROW_H / 2);
+      if (flapFont) row.drawFastHLine(BADGE_X, ROW_H / 2, bw, TFT_BLACK);
       int minW;
       if (leaving && flapFont) {
         minW = FLAP_ICON_W;
-        flapIcon(row, MIN_RIGHT - minW, 3, icat, c, oldMin[0] || forced ? stage : 0);
+        flapIcon(row, MIN_RIGHT - minW, FLAP_TOP, icat, c, oldMin[0] || forced ? stage : 0);
       } else if (leaving) {
         minW = pixelFont ? PIX_VEH_W : VEH_W;
         if (blink) pixelFont ? drawPixelVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c)
                              : drawVehicle(row, MIN_RIGHT, ROW_H / 2, d->cat, c);
       } else if (flapFont) {
         minW = flapCharsWidth(row, nm);
-        flapChars(row, nm, om, MIN_RIGHT - minW, 3, BASE, c, stage);
+        flapChars(row, nm, om, MIN_RIGHT - minW, FLAP_TOP, BASE, c, stage);
         if (strlen(nm) == 2)  // einstellige Minute: leeres Zehner-Blatt wie auf der echten Tafel
-          flapModule(row, MIN_RIGHT - minW - FLAP_P, 3, FLAP_W, "", "", 0, -1, BASE, 0, c);
+          flapModule(row, MIN_RIGHT - minW - FLAP_P, FLAP_TOP, FLAP_W, "", "", 0, -1, BASE, 0, c);
       } else {
         minW = txtWidth(row, buf, BIG);
         txtDraw(row, buf, MIN_RIGHT - minW, BASE, BIG, c);
       }
       if (flapFont) minW = max(minW, flapCharsWidth(row, "00'"));  // feste Spalten wie auf der echten Tafel
-      int right = MIN_RIGHT - minW - 10;
+      int right = MIN_RIGHT - minW - COL_GAP;
       if (flapFont && flapPlat) {  // Gleisnummer auf eigenem Blatt, leeres Blatt wenn ohne Gleis
-        const int mw = max(FLAP_W, txtWidth(row, "00", BIG) + 6), lw = txtWidth(row, "Gl.", SMALL);
-        flapModule(row, right - mw, 3, mw, d->platform, d->platform, 0, -1, BASE, 0, C_LABEL);
-        if (d->platform[0]) txtDraw(row, "Gl.", right - mw - 3 - lw, BASE - 1, SMALL, C_LABEL);
-        right -= mw + lw + 13;
+        const int mw = max(FLAP_W, txtWidth(row, "00", BIG) + FLAP_PADX + 1), lw = txtWidth(row, "Gl.", SMALL);
+        flapModule(row, right - mw, FLAP_TOP, mw, d->platform, d->platform, 0, -1, BASE, 0, C_LABEL);
+        if (d->platform[0]) txtDraw(row, "Gl.", right - mw - (SMALL_LCD ? 2 : 3) - lw, BASE - 1, SMALL, C_LABEL);
+        right -= mw + lw + COL_GAP + 3;
       } else if (d->platform[0]) {
         char pl[14];
         if (pixelFont) {  // Gleis als leuchtendes Schild mit dunkler Nummer, alles auf dem Raster
-          const int cols = (dotWidth(d->platform, BIG) + 1) / 3;
-          int x0 = right - (cols + 1) * 3 - 1;
-          x0 -= x0 % 3;
-          for (int x = x0; x <= x0 + (cols + 1) * 3; x += 3)
-            for (int y = 3; y <= 27; y += 3) row.fillRect(x, y, 2, 2, C_LABEL);
-          dotDraw(row, d->platform, x0 + 3, BASE + 3, BIG, C_BG);
-          right = x0 - 9;
+          const int cols = (dotWidth(d->platform, BIG) + 1) / DOT_P;
+          int x0 = right - (cols + 1) * DOT_P - 1;
+          x0 -= x0 % DOT_P;
+          for (int x = x0; x <= x0 + (cols + 1) * DOT_P; x += DOT_P)
+            for (int y = DOT_P; y <= ROW_H - 2 * DOT_P; y += DOT_P) row.fillRect(x, y, 2, 2, C_LABEL);
+          dotDraw(row, d->platform, x0 + DOT_P, BASE + DOT_P, BIG, C_BG);
+          right = x0 - 3 * DOT_P;
         } else {
-          snprintf(pl, sizeof pl, "Gl. %s", d->platform);
+          snprintf(pl, sizeof pl, SMALL_LCD ? "Gl.%s" : "Gl. %s", d->platform);
           const int pw = txtWidth(row, pl, SMALL);
           txtDraw(row, pl, right - pw, BASE - 1, SMALL, C_LABEL);
-          right -= pw + 10;
+          right -= pw + COL_GAP;
         }
       }
       if (flapFont)
-        flapModule(row, DEST_X - 5, 3, right - DEST_X + 8, nd, od, stage, DEST_X, BASE,
+        flapModule(row, DEST_X - FLAP_PADX, FLAP_TOP, right - DEST_X + FLAP_PADX + 3, nd, od, stage, DEST_X, BASE,
                    right - DEST_X, C_WHITE);
       else
         drawLabel(row, d->dest, destX, BASE, right - destX, C_WHITE);
     }
-    put(row, 0, rowY(r));
+    row.pushSprite(0, rowY(r));
   };
   if (flapFont && d && (forced || strcmp(prevDest[r], d->dest) || strcmp(prevMin[r], buf))) {
     // Zwischenblätter: Ziele der anderen Zeilen (wie gedruckte Ortsnamen), Ziffern zählen hoch
@@ -1348,8 +1343,8 @@ void drawTextScreen(const char* title, std::initializer_list<const char*> lines)
   invalidate();
   tft.fillScreen(C_BG);
   drawTitleBar(title);
-  int y = 84;
-  for (const char* l : lines) { drawLabel(tft, l, 14, y, 292, C_WHITE, UI19); y += 28; }
+  int y = TXT_Y;
+  for (const char* l : lines) { drawLabel(tft, l, TXT_X, y, SCREEN_W - 2 * TXT_X, C_WHITE, UI19); y += TXT_STEP; }
 }
 
 // Update-Fortschritt: Balken, Prozent, KB und geschätzte Restzeit (nur bei Änderung neu zeichnen)
@@ -1357,26 +1352,26 @@ void drawUpdate(int& shown) {
   const int total = updTotal, cur = updCur;
   const int pct = total < 0 ? -2 : total > 0 ? (int)((int64_t)cur * 100 / total) : -1;
   if (pct == shown) return;
-  static const int BX = 14, BY = 104, BW = 292, BH = 22;
+  static const int BX = TXT_X, BY = UPD_BY, BW = SCREEN_W - 2 * TXT_X, BH = UPD_BH, TW = BW;
   if (shown == -3) {
     char l[40];
     snprintf(l, sizeof l, "Version %d wird installiert", updTo);
     drawTextScreen("Software-Update", {l});
-    drawLabel(tft, "Bitte nicht ausstecken", 14, 226, 292, C_LABEL, UI2);
+    drawLabel(tft, "Bitte nicht ausstecken", BX, UPD_FOOT, TW, C_LABEL, UI2);
     tft.drawRect(BX, BY, BW, BH, C_WHITE);
   }
   shown = pct;
-  tft.fillRect(0, 140, SCREEN_W, 64, C_BG);
+  tft.fillRect(0, UPD_CLR_Y, SCREEN_W, UPD_CLR_H, C_BG);
   if (pct == -2) {
-    drawLabel(tft, "Update fehlgeschlagen", 14, 166, 292, C_YELLOW, UI19);
-    drawLabel(tft, *updErr ? updErr : "Versuche es später nochmals", 14, 192, 292, C_LABEL, UI2);
+    drawLabel(tft, "Update fehlgeschlagen", BX, UPD_L1, TW, C_YELLOW, UI19);
+    drawLabel(tft, *updErr ? updErr : "Versuche es später nochmals", BX, UPD_L2, TW, C_LABEL, UI2);
     return;
   }
-  if (pct < 0) { drawLabel(tft, "Verbinde mit GitHub...", 14, 166, 292, C_WHITE, UI19); return; }
+  if (pct < 0) { drawLabel(tft, "Verbinde mit GitHub...", BX, UPD_L1, TW, C_WHITE, UI19); return; }
   tft.fillRect(BX + 2, BY + 2, (BW - 4) * pct / 100, BH - 4, C_GO);
   char s[48];
   snprintf(s, sizeof s, "%d %%", pct);
-  drawLabel(tft, s, 14, 170, 120, C_WHITE, BIG);
+  drawLabel(tft, s, BX, UPD_PCT, TW, C_WHITE, BIG);
   if (pct >= 100) {
     strcpy(s, "Fertig, startet neu...");
   } else {
@@ -1385,7 +1380,7 @@ void drawUpdate(int& shown) {
     if (cur > 0 && el > 2000) snprintf(s, sizeof s, "%d von %d KB, noch ca. %d:%02d", cur / 1024, total / 1024, rem / 60, rem % 60);
     else snprintf(s, sizeof s, "%d von %d KB", cur / 1024, total / 1024);
   }
-  drawLabel(tft, s, 14, 196, 292, C_LABEL, UI19);
+  drawLabel(tft, s, BX, UPD_INFO, TW, C_LABEL, SMALL_LCD ? UI2 : UI19);
 }
 
 // ===================== QR-Bildschirme =====================
@@ -1397,11 +1392,7 @@ void drawQR(const char* text, int x, int y, int maxSize) {
   while (ver <= 7 && CAP[ver] < len) ver++;
   if (ver > 7) return;
   qrcode_initText(&qr, buf, ver, ECC_LOW, text);
-  int scale = maxSize / (qr.size + 4);
-#ifdef LCD_HALF
-  scale = max(2, scale & ~1);  // gerade, damit die Module nach dem Halbieren scharf bleiben
-#endif
-  const int total = scale * (qr.size + 4);
+  int scale = maxSize / (qr.size + 4), total = scale * (qr.size + 4);
   tft.fillRect(x, y, total, total, TFT_WHITE);
   for (int qy = 0; qy < qr.size; qy++)
     for (int qx = 0; qx < qr.size; qx++)
@@ -1414,16 +1405,18 @@ void drawQrScreen(const char* title, const String& qrText,
   invalidate();
   tft.fillScreen(C_BG);
   drawTitleBar(title);
-  drawQR(qrText.c_str(), 8, 46, 170);
-  int y = 70;
-  for (const char* s : steps) { drawLabel(tft, s, 190, y, 126, C_WHITE, UI19); y += 24; }
-  drawLabel(tft, footer.c_str(), 8, 220, 304, C_LABEL, UI2);
+  drawQR(qrText.c_str(), QR_X, QR_Y, QR_SIZE);
+  int y = QR_TXT_Y;
+  for (const char* s : steps) { drawLabel(tft, s, QR_TXT_X, y, SCREEN_W - QR_TXT_X - 2, C_WHITE, UI19); y += QR_TXT_STEP; }
+  drawLabel(tft, footer.c_str(), PAD_X, QR_FOOT_Y, SCREEN_W - 2 * PAD_X, C_LABEL, UI2);
 }
 
 void showInfo(uint32_t ms) {
   String url = String("http://") + HOSTNAME + ".local/";
   drawQrScreen("Einstellungen", url,
-               {"Code mit dem", "Handy scannen", "", "Handy muss im", "selben WLAN", "sein"}, url);
+               SMALL_LCD ? std::initializer_list<const char*>{"Code", "scannen", "", "Handy im", "selben", "WLAN"}
+                         : std::initializer_list<const char*>{"Code mit dem", "Handy scannen", "", "Handy muss im", "selben WLAN", "sein"},
+               url);
   infoUntil = millis() + ms;
   if (!infoUntil) infoUntil = 1;
 }
@@ -1434,7 +1427,6 @@ void showInfo(uint32_t ms) {
   drawTitleBar(title);
   invalidate();
   drawMessageRow(0, "Starte neu...");
-  present();
   delay(1500);
   ESP.restart();
   for (;;) {}
@@ -1584,7 +1576,7 @@ bool wrongPassword(uint8_t r) {
 
   const char* wifiQr = "WIFI:T:nopass;S:Abfahrtstafel;;";
   const String footer = hadWifi ? "Gespeichert: " + saved + " - neuer Versuch jede Minute"
-                                : String("Oder am Handy das WLAN \"Abfahrtstafel\" antippen");
+                                : String(SMALL_LCD ? "Oder WLAN \"Abfahrtstafel\"" : "Oder am Handy das WLAN \"Abfahrtstafel\" antippen");
   uint32_t lastRetry = millis(), bgStart = 0, okAt = 0;
   int lastScreen = -1;
   for (;;) {
@@ -1649,13 +1641,15 @@ bool wrongPassword(uint8_t r) {
         drawTextScreen(errTitle, {"Am Handy nochmals", "versuchen."});
       } else if (clients > 0) {
         drawQrScreen("Handy verbunden", home,
-                     {"Das Fenster zum", "Einrichten öffnet", "sich am Handy.", "", "Falls nicht:", "Code scannen"},
+                     SMALL_LCD ? std::initializer_list<const char*>{"Seite", "öffnet", "sich am", "Handy.", "Sonst:", "scannen"}
+                               : std::initializer_list<const char*>{"Das Fenster zum", "Einrichten öffnet", "sich am Handy.", "", "Falls nicht:", "Code scannen"},
                      "Adresse: " + home);
       } else {
         drawQrScreen(errTitle ? errTitle : hadWifi ? "WLAN nicht erreichbar" : "WLAN einrichten", wifiQr,
-                     {"1. Code mit der", "Handy-Kamera", "scannen", "2. Dein WLAN", "auswählen"}, footer);
+                     SMALL_LCD ? std::initializer_list<const char*>{"1. Code", "scannen", "2. WLAN", "wählen"}
+                               : std::initializer_list<const char*>{"1. Code mit der", "Handy-Kamera", "scannen", "2. Dein WLAN", "auswählen"},
+                     footer);
       }
-      present();
     }
     delay(5);
   }
@@ -1718,23 +1712,14 @@ void setup() {
   prefs.begin("tafel", false);
   loadConfig();
 
-  lcd.init();
-  lcd.setRotation(1);
-#ifdef LCD_HALF
-  lcd.fillScreen(TFT_BLACK);
-  tft.setColorDepth(16);
-  tft.createSprite(320, 240);
-  outBuf = (uint16_t*)calloc(OUT_W * OUT_H, sizeof(uint16_t));
-  Serial.begin(115200);
-  Serial.printf("Abfahrtstafel %d: PSRAM %u KB, Bildspeicher %s\n", FW_BUILD, ESP.getPsramSize() / 1024,
-                tft.getPointer() && outBuf ? "ok" : "FEHLT");
-#endif
+  tft.init();
+  tft.setRotation(1);
   tft.setTextWrap(false, false);
   tft.setAttribute(UTF8_SWITCH, 0);
   tft.fillScreen(C_BG);
   row.createSprite(SCREEN_W, ROW_H);
   hdr.createSprite(SCREEN_W, HEADER_H);
-  badgeSpr.createSprite(64, 24);
+  badgeSpr.createSprite(ITAL_W, ITAL_H);
   for (TFT_eSprite* s : {&row, &hdr, &badgeSpr}) {
     s->setTextWrap(false, false);
     s->setAttribute(UTF8_SWITCH, 0);
@@ -1785,12 +1770,6 @@ void loop() {
   server.handleClient();
   handleButton();
   watchdog();
-#ifdef LCD_HALF
-  // unterer Rand (8 Zeilen unter dem halbierten Bild) in Hintergrundfarbe
-  if (outBg != C_BG && !nightNow) { outBg = C_BG; lcd.fillRect(0, OUT_H, OUT_W, 128 - OUT_H, C_BG); }
-  static uint32_t lastPresent = 0;
-  if (!nightNow && millis() - lastPresent >= 50) { lastPresent = millis(); present(); }
-#endif
 
   static int updShown = -3;  // -3 = nicht sichtbar
   if (updating) {
@@ -1828,14 +1807,13 @@ bool tick() {
     nightNow = dark;
     if (dark) {
       tft.fillScreen(TFT_BLACK);
-      present();
       backlight(false);
-      lcd.writecommand(TFT_DISPOFF);
-      lcd.writecommand(TFT_SLPIN);
+      tft.writecommand(TFT_DISPOFF);
+      tft.writecommand(TFT_SLPIN);
     } else {
-      lcd.writecommand(TFT_SLPOUT);
+      tft.writecommand(TFT_SLPOUT);
       delay(120);
-      lcd.writecommand(TFT_DISPON);
+      tft.writecommand(TFT_DISPON);
       backlight(true);
       serverSeen = millis();
       if (fetchHandle) xTaskNotifyGive(fetchHandle);
@@ -1886,10 +1864,10 @@ bool tick() {
     for (int r = 0; r < shown; r++) {
       char l[16];
       pixLabel(feed[r], l, sizeof l);
-      dx = max(dx, 6 + dotWidth(l, BIG) + 7);
+      dx = max(dx, BADGE_X + dotWidth(l, BIG) + 2 * DOT_P + 1);
       plat |= feed[r].platform[0] != 0;
     }
-    pixDestX = min((dx + 2) / 3 * 3, 84);
+    pixDestX = min((dx + DOT_P - 1) / DOT_P * DOT_P, PIX_DEST_MAX);
     flapPlat = plat;
     for (int r = 0; r < shown; r++) drawRow(r, &feed[r], now, blink);
   }
