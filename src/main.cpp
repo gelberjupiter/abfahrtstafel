@@ -65,12 +65,13 @@ static const char* DEFAULT_CFG = R"({"title":"Abfahrten","stations":[
 #ifdef LCD_SMALL
 // 1.8" ST7735, 160x128 quer: 5 Zeilen, kleinere Schriften, engere Abstände
 static const int SCREEN_W = 160, HEADER_H = 18, ROW_H = 22, MAX_ROWS = 5, BASE = 16;
-static const int BADGE_H = 15, DEST_X = 30, MIN_RIGHT = 157, CLOCK_X = 139, HDR_BASE = 14;
-static const int PAD_X = 4, TITLE_W = 104, CLK_GAP = 3, COL_GAP = 4;
+static const int BADGE_H = 15, DEST_X = 30, MIN_RIGHT = 157, CLOCK_X = 132, HDR_BASE = 14;
+static const int PAD_X = 4, TITLE_W = 96, CLK_GAP = 4, COL_GAP = 4;
 static const int BADGE_X = 3, BADGE_MIN = 21, BADGE_MAX = 27, BADGE_PAD = 6, BADGE_R = 2, BADGE_TXT = 4;
 static const int ITAL_W = 40, ITAL_H = 16, ITAL_BASE = 12;
 static const int FLAP_W = 9, FLAP_P = 10, FLAP_H = 18, FLAP_TOP = 2, FLAP_PADX = 3, HDR_FLAP_TOP = 0;
-static const int DOT_P = 2, PIX_DEST_MAX = 48, STALE_DX = 26, STALE_DX_FLAP = 28, STALE_R = 2;
+// LED-Punkte: Raster 2 px, Punkt 1 px (dunkle Lücken wie bei einer echten LED-Matrix)
+static const int DOT_P = 2, DOT_S = 1, HDR_GRID_Y = 0, PIX_DEST_MAX = 48, STALE_DX = 30, STALE_DX_FLAP = 30, STALE_R = 2;
 static const int COLON_S = 2, COLON_Y1 = 9, COLON_Y2 = 4;
 static const int MSG_X = PAD_X;
 // Textbildschirme, Update, QR
@@ -86,7 +87,7 @@ static const int PAD_X = 8, TITLE_W = 220, CLK_GAP = 4, COL_GAP = 10;
 static const int BADGE_X = 6, BADGE_MIN = 42, BADGE_MAX = 50, BADGE_PAD = 12, BADGE_R = 3, BADGE_TXT = 6;
 static const int ITAL_W = 64, ITAL_H = 24, ITAL_BASE = 18;
 static const int FLAP_W = 15, FLAP_P = 17, FLAP_H = 27, FLAP_TOP = 3, FLAP_PADX = 5, HDR_FLAP_TOP = HDR_BASE - 22;
-static const int DOT_P = 3, PIX_DEST_MAX = 84, STALE_DX = 42, STALE_DX_FLAP = 48, STALE_R = 4;
+static const int DOT_P = 3, DOT_S = 2, HDR_GRID_Y = 1, PIX_DEST_MAX = 84, STALE_DX = 42, STALE_DX_FLAP = 48, STALE_R = 4;
 static const int COLON_S = 3, COLON_Y1 = 14, COLON_Y2 = 6;
 static const int MSG_X = DEST_X;
 static const int TXT_X = 14, TXT_Y = 84, TXT_STEP = 28;
@@ -104,10 +105,17 @@ constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
 
 struct ColorDef { const char* key; const char* name; const char* def; };
 const ColorDef COLORS[] = {
+#ifdef LCD_SMALL  // LED-Anzeige: Orange auf Schwarz
+  {"bg", "Hintergrund", "#000000"}, {"hdr", "Kopfzeile", "#000000"},
+  {"line", "Trennlinien", "#000000"}, {"text", "Text", "#ff8000"},
+  {"delay", "Verspätung", "#ffd000"}, {"muted", "Hinweise", "#a05000"},
+  {"go", "Jetzt los", "#ff2a2a"},
+#else
   {"bg", "Hintergrund", "#1a2ab0"}, {"hdr", "Kopfzeile", "#101878"},
   {"line", "Trennlinien", "#4055d8"}, {"text", "Text", "#ffffff"},
   {"delay", "Verspätung", "#ffde15"}, {"muted", "Hinweise", "#b4b8e6"},
   {"go", "Jetzt los", "#ff4a3d"},
+#endif
 };
 static const int NUM_COLORS = sizeof(COLORS) / sizeof(COLORS[0]);
 String colHex[NUM_COLORS];
@@ -142,7 +150,7 @@ volatile uint32_t cfgGen = 0;
 bool nightOn = false;
 int nightFrom = 0, nightTo = 6 * 60;
 volatile bool nightNow = false;
-bool pixelFont = false, flapFont = false;
+bool pixelFont = SMALL_LCD, flapFont = false;  // kleines Display: immer LED
 SemaphoreHandle_t cfgMutex, depMutex;
 Preferences prefs;
 
@@ -182,6 +190,8 @@ uint8_t stStatus[MAX_ST];
 
 // Bildspeicher-Abgleich: nur geänderte Zeilen werden gezeichnet und übertragen
 uint32_t rowSig[MAX_ROWS], hdrSig;
+extern uint32_t rowContent[MAX_ROWS];
+extern int rowOverflow[MAX_ROWS];
 bool bottomDirty = true;
 
 char prevDest[MAX_ROWS][48], prevMin[MAX_ROWS][8], prevClock[2][4];
@@ -193,6 +203,8 @@ void invalidate() {
   memset(prevDest, 0, sizeof prevDest);
   memset(prevMin, 0, sizeof prevMin);
   memset(prevClock, 0, sizeof prevClock);
+  memset(rowContent, 0, sizeof rowContent);
+  memset(rowOverflow, 0, sizeof rowOverflow);
   hdrSig = 0;
   bottomDirty = true;
 }
@@ -294,7 +306,7 @@ int dotWidth(const char* s, int size) {
 }
 
 void dotDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t color) {
-  const int p = dotPitch(size), top = baseline - 7 * p, ds = p > 1 ? 2 : 1;
+  const int p = dotPitch(size), top = baseline - 7 * p, ds = DOT_S;
   if (size == BIG) x -= x % DOT_P;  // aufs Punkteraster
   else g.fillRect(x - 1, top - 1, dotWidth(s, size) + 3, 7 * p + 1, C_BG);
   int f, l;
@@ -333,7 +345,7 @@ const NarrowGlyph* narrowGlyph(char c) {
 int narrowWidth(const char* s) {
   int w = 0;
   for (; *s; s++) { auto gl = narrowGlyph(*s); w += (gl ? gl->w : 3) + 1; }
-  return w ? (w - 1) * DOT_P - 1 : 0;
+  return w ? (w - 1) * DOT_P - (DOT_P - DOT_S) : 0;
 }
 
 // gleiche Höhe und gleiches Raster wie die grosse Punktschrift, nur schmaler
@@ -345,7 +357,7 @@ void narrowDraw(TFT_eSPI& g, const char* s, int x, int baseline, uint16_t color)
     const int w = gl ? gl->w : 3;
     for (int cx = 0; gl && cx < w; cx++)
       for (int ry = 0, bits = gl->col[cx]; bits; ry++, bits >>= 1)
-        if (bits & 1) g.fillRect(x + cx * DOT_P, top + ry * DOT_P, 2, 2, color);
+        if (bits & 1) g.fillRect(x + cx * DOT_P, top + ry * DOT_P, DOT_S, DOT_S, color);
     x += (w + 1) * DOT_P;
   }
 }
@@ -355,10 +367,10 @@ inline bool usesDots(int size) { return pixelFont && size <= SMALL; }
 inline uint16_t dimDot(uint16_t bg) { return tft.alphaBlend(40, C_WHITE, bg); }
 
 void dotGrid(TFT_eSPI& g, int h, int yOff, uint16_t bg) {
-  if (!pixelFont || DOT_P < 3) return;  // auf dem kleinen Display ohne Hintergrundraster
+  if (!pixelFont) return;
   const uint16_t c = dimDot(bg);
-  for (int y = yOff; y + 2 <= h; y += 3)
-    for (int x = 0; x + 2 <= SCREEN_W; x += 3) g.fillRect(x, y, 2, 2, c);
+  for (int y = yOff; y + DOT_S <= h; y += DOT_P)
+    for (int x = 0; x + DOT_S <= SCREEN_W; x += DOT_P) g.fillRect(x, y, DOT_S, DOT_S, c);
 }
 
 void setFont(TFT_eSPI& g, int size) {
@@ -388,10 +400,9 @@ void txtDraw(TFT_eSPI& g, const char* s, int x, int baseline, int size, uint16_t
 }
 
 // UTF-8 -> Latin-1, bei Bedarf mit "." gekürzt
-void drawLabel(TFT_eSPI& g, const char* s, int x, int baseline, int maxW, uint16_t color, int size = BIG) {
-  char txt[64];
+int toLatin1(const char* s, char* txt, int max) {
   int n = 0;
-  while (*s && n < 62) {
+  while (*s && n < max - 2) {
     uint8_t c = *s++;
     if (c < 0x80) txt[n++] = c;
     else if ((c & 0xE0) == 0xC0 && (*s & 0xC0) == 0x80) {
@@ -403,6 +414,12 @@ void drawLabel(TFT_eSPI& g, const char* s, int x, int baseline, int maxW, uint16
     }
   }
   txt[n] = 0;
+  return n;
+}
+
+void drawLabel(TFT_eSPI& g, const char* s, int x, int baseline, int maxW, uint16_t color, int size = BIG) {
+  char txt[64];
+  int n = toLatin1(s, txt, sizeof txt);
   if (maxW > 0 && txtWidth(g, txt, size) > maxW) {
     while (n > 1) {
       n--;
@@ -480,7 +497,7 @@ void applyConfig(JsonVariantConst j) {
     cfgNumSt = n;
   }
   nightOn = nOn; nightFrom = nFrom; nightTo = nTo;
-  if (j["font"].is<const char*>()) {
+  if (j["font"].is<const char*>() && !SMALL_LCD) {
     pixelFont = !strcmp(j["font"], "pixel");
     flapFont = !strcmp(j["font"], "flap");
   }
@@ -516,6 +533,7 @@ void configToJson(JsonDocument& d, bool forWeb) {
     }
   }
   if (forWeb) {
+    if (SMALL_LCD) d["fixedFont"] = "pixel";  // Webseite blendet die Schriftwahl aus
     d["ssid"] = WiFi.SSID();
     d["host"] = String(HOSTNAME) + ".local";
     d["version"] = FW_BUILD;
@@ -547,6 +565,13 @@ void loadConfig() {
     JsonDocument s;
     if (!deserializeJson(s, saved)) applyConfig(s);
   }
+#ifdef LCD_SMALL
+  // noch die alten blauen Standardfarben gespeichert -> auf die LED-Farben umstellen
+  if (colHex[0] == "#1a2ab0") {
+    for (int i = 0; i < NUM_COLORS; i++) colHex[i] = COLORS[i].def;
+    applyColors();
+  }
+#endif
 }
 
 void saveConfig() {
@@ -968,6 +993,37 @@ void fetchTask(void*) {
   }
 }
 
+// ===================== Lauftext =====================
+// Zu lange Texte (kleines Display): 2 s stehen, durchlaufen, kurz stehen, zurückspringen
+static const uint32_t SCROLL_MS = 70;  // ein Punkt pro Schritt
+static const int SCROLL_HOLD = 30, SCROLL_END = 20;
+uint32_t scrollTick = 0, rowContent[MAX_ROWS], rowStart[MAX_ROWS];
+int rowOverflow[MAX_ROWS];  // so viele Pixel ist der Text zu lang (0 = passt)
+
+// Verschiebung der Zeile r jetzt (Vielfaches des Punkterasters)
+int scrollOffset(int r, uint32_t content) {
+  if (content != rowContent[r]) { rowContent[r] = content; rowStart[r] = scrollTick; rowOverflow[r] = 0; }
+  if (rowOverflow[r] <= 0) return 0;
+  const int steps = (rowOverflow[r] + DOT_P - 1) / DOT_P, cycle = SCROLL_HOLD + steps + SCROLL_END;
+  const int pos = (int)((scrollTick - rowStart[r]) % cycle) - SCROLL_HOLD;
+  return constrain(pos, 0, steps) * DOT_P;
+}
+
+bool anyScrolling() {
+  for (int r = 0; r < MAX_ROWS; r++) if (rowOverflow[r] > 0) return true;
+  return false;
+}
+
+// Text in Punktschrift, auf [x, x+w) beschnitten und um off nach links verschoben
+void scrollText(TFT_eSprite& g, int r, const char* utf8, int x, int w, uint16_t color, int off) {
+  char txt[64];
+  toLatin1(utf8, txt, sizeof txt);
+  rowOverflow[r] = max(0, dotWidth(txt, BIG) - w);
+  g.setViewport(x, 0, w, ROW_H, false);
+  dotDraw(g, txt, x - off, BASE, BIG, color);
+  g.resetViewport();
+}
+
 // ===================== Zeichnen: Tafel =====================
 const uint16_t PIX_BUS[8]   = {0x0FE, 0x1FF, 0x125, 0x125, 0x1FF, 0x1FF, 0x0C6, 0x0C6};
 const uint16_t PIX_TRAM[8]  = {0x07C, 0x010, 0x1FF, 0x155, 0x1FF, 0x1FF, 0x082, 0x1FF};
@@ -1025,7 +1081,7 @@ void drawPixelVehicle(TFT_eSPI& g, int xRight, int cy, const char* cat, uint16_t
   const int x0 = (xRight - PIX_VEH_W) / DOT_P * DOT_P, y0 = cy - 4 * DOT_P - 1;
   for (int ry = 0; ry < 8; ry++)
     for (int cx = 0; cx < 9; cx++)
-      if (bm[ry] & (1 << (8 - cx))) g.fillRect(x0 + cx * DOT_P, y0 + ry * DOT_P, 2, 2, c);
+      if (bm[ry] & (1 << (8 - cx))) g.fillRect(x0 + cx * DOT_P, y0 + ry * DOT_P, DOT_S, DOT_S, c);
 }
 
 // Kursiv wie die SBB-Zugsignete: Text ins Hilfs-Sprite, dann zeilenweise versetzt kopieren
@@ -1052,7 +1108,7 @@ void pixLabel(const Departure& d, char* out, size_t n) {
 }
 
 void drawPixelLine(TFT_eSPI& g, const char* label, int x) {
-  const int maxW = pixDestX - x - 6;
+  const int maxW = pixDestX - x - 2 * DOT_P;
   if (dotWidth(label, BIG) <= maxW) { dotDraw(g, label, x, BASE, BIG, C_WHITE); return; }
   char buf[16];
   strlcpy(buf, label, sizeof buf);
@@ -1193,7 +1249,7 @@ void rattleDigits(char* out, const char* s, const char* old, int k) {
 
 void drawTitleBar(const char* title) {
   hdr.fillSprite(C_HDR);
-  dotGrid(hdr, HEADER_H, 1, C_HDR);
+  dotGrid(hdr, HEADER_H, HDR_GRID_Y, C_HDR);
   drawLabel(hdr, title, PAD_X, HDR_BASE, SCREEN_W - 2 * PAD_X, C_WHITE);
   hdr.pushSprite(0, 0);
 }
@@ -1209,7 +1265,7 @@ void drawHeader(const tm& t, bool colon, bool stale) {
     snprintf(mm, sizeof mm, "%02d", t.tm_min);
     auto render = [&](int stage, const char* h, const char* oh, const char* m, const char* om) {
       hdr.fillSprite(C_HDR);
-      dotGrid(hdr, HEADER_H, 1, C_HDR);
+      dotGrid(hdr, HEADER_H, HDR_GRID_Y, C_HDR);
       drawLabel(hdr, cfgTitle.c_str(), PAD_X, HDR_BASE, TITLE_W, C_WHITE);
       if (flapFont) {
         flapChars(hdr, h, oh, CLOCK_X - CLK_GAP - flapCharsWidth(hdr, h), HDR_FLAP_TOP, HDR_BASE, C_WHITE, stage);
@@ -1238,10 +1294,18 @@ void drawHeader(const tm& t, bool colon, bool stale) {
     strcpy(prevClock[0], hh);
     strcpy(prevClock[1], mm);
   }
+#ifdef LCD_SMALL
+  // Doppelpunkt wie in der Punktschrift: 2x2 Punkte oben und unten
+  const uint16_t c = colon ? C_WHITE : dimDot(C_HDR);
+  const int top = HDR_BASE - 7 * DOT_P;
+  for (int cx = 0; cx < 2; cx++)
+    for (int ry : {1, 2, 4, 5}) tft.fillRect(CLOCK_X - DOT_P + cx * DOT_P, top + ry * DOT_P, DOT_S, DOT_S, c);
+#else
   const int s = pixelFont ? 2 : COLON_S, x = pixelFont ? CLOCK_X : CLOCK_X - 1;
-  const uint16_t c = colon ? C_WHITE : pixelFont && DOT_P >= 3 ? dimDot(C_HDR) : C_HDR;
+  const uint16_t c = colon ? C_WHITE : pixelFont ? dimDot(C_HDR) : C_HDR;
   tft.fillRect(x, HDR_BASE - COLON_Y1 - (pixelFont ? 1 : 0), s, s, c);
   tft.fillRect(x, HDR_BASE - COLON_Y2, s, s, c);
+#endif
 }
 
 inline int rowY(int r) { return HEADER_H + r * ROW_H; }
@@ -1255,16 +1319,19 @@ void fillBottom() {
 
 void beginRow() {
   row.fillSprite(C_BG);
-  dotGrid(row, ROW_H - 1, 0, C_BG);
-  row.drawFastHLine(0, ROW_H - 1, SCREEN_W, C_LINE);
+  dotGrid(row, SMALL_LCD ? ROW_H : ROW_H - 1, 0, C_BG);
+  if (!SMALL_LCD) row.drawFastHLine(0, ROW_H - 1, SCREEN_W, C_LINE);  // LED-Anzeige ohne Linien
 }
 
 void drawMessageRow(int r, const char* msg) {
-  uint32_t sig = Hash().str(msg).val(cfgGen).get();
+  const uint32_t content = Hash().str(msg).val(cfgGen).get();
+  const int off = SMALL_LCD ? scrollOffset(r, content) : 0;
+  uint32_t sig = Hash().val(content).val(off).get();
   if (sig == rowSig[r]) return;
   rowSig[r] = sig;
   beginRow();
-  if (flapFont && *msg)
+  if (SMALL_LCD) scrollText(row, r, msg, MSG_X, MIN_RIGHT - MSG_X, C_LABEL, off);
+  else if (flapFont && *msg)
     flapModule(row, MSG_X - FLAP_PADX, FLAP_TOP, MIN_RIGHT - MSG_X + FLAP_PADX, msg, "", 0, MSG_X, BASE,
                MIN_RIGHT - MSG_X - 4, C_LABEL);
   else drawLabel(row, msg, MSG_X, BASE, MIN_RIGHT - MSG_X - 2, C_LABEL);
@@ -1291,6 +1358,8 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
     sig.val(pixDestX).val(flapPlat);
   }
   const int destX = pixelFont ? pixDestX : DEST_X;
+  const int off = SMALL_LCD ? scrollOffset(r, sig.get()) : 0;
+  sig.val(off);
   const bool forced = d && (flapForce & (1 << r));
   flapForce &= ~(1 << r);
   if (!forced && sig.get() == rowSig[r]) return;
@@ -1334,7 +1403,7 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
           int x0 = right - (cols + 1) * DOT_P - 1;
           x0 -= x0 % DOT_P;
           for (int x = x0; x <= x0 + (cols + 1) * DOT_P; x += DOT_P)
-            for (int y = DOT_P; y <= ROW_H - 2 * DOT_P; y += DOT_P) row.fillRect(x, y, 2, 2, C_LABEL);
+            for (int y = DOT_P; y <= ROW_H - 2 * DOT_P; y += DOT_P) row.fillRect(x, y, DOT_S, DOT_S, C_LABEL);
           dotDraw(row, d->platform, x0 + DOT_P, BASE + DOT_P, BIG, C_BG);
           right = x0 - 3 * DOT_P;
         } else {
@@ -1347,6 +1416,8 @@ void drawRow(int r, const Departure* d, time_t now, bool blink) {
       if (flapFont)
         flapModule(row, DEST_X - FLAP_PADX, FLAP_TOP, right - DEST_X + FLAP_PADX + 3, nd, od, stage, DEST_X, BASE,
                    right - DEST_X, C_WHITE);
+      else if (SMALL_LCD)
+        scrollText(row, r, d->dest, destX, right - destX, C_WHITE, off);
       else
         drawLabel(row, d->dest, destX, BASE, right - destX, C_WHITE);
     }
@@ -1807,9 +1878,11 @@ void setup() {
   time_t now = time(nullptr);
   struct tm t;
   localtime_r(&now, &t);
-  // QR-Code nur, wenn noch etwas einzurichten ist: nach der WLAN-Einrichtung oder ohne Haltestelle
-  // (bleibt stehen, bis die Seite geöffnet wurde, max. 10 min). Sonst: BOOT-Taste kurz drücken.
-  if (!nightAt(t) && (prefs.getBool("fresh", false) || !cfgNumSt)) showInfo(600000);
+  // QR-Code nur, wenn noch etwas einzurichten ist: nach der WLAN-Einrichtung oder ohne Haltestelle.
+  // Wird er 30 s nicht gescannt, startet die Tafel mit den Standard-Einstellungen; nach der
+  // WLAN-Einrichtung nur einmal. Später jederzeit: BOOT-Taste kurz drücken.
+  if (!nightAt(t) && (prefs.getBool("fresh", false) || !cfgNumSt)) showInfo(30000);
+  if (prefs.isKey("fresh")) prefs.remove("fresh");
 }
 
 // Selbstheilung: hängender Abruf, lange ohne Server oder WLAN -> Neustart (nicht nachts)
@@ -1851,7 +1924,10 @@ bool tick() {
   time_t now = time(nullptr);
   struct tm t;
   localtime_r(&now, &t);
-  if (t.tm_sec == lastSec) return false;
+  static uint32_t lastScroll = 0;
+  const bool scrollDue = SMALL_LCD && millis() - lastScroll >= SCROLL_MS && anyScrolling();
+  if (t.tm_sec == lastSec && !scrollDue) return false;
+  if (scrollDue) { lastScroll = millis(); scrollTick++; }
   lastSec = t.tm_sec;
   bool blink = !(t.tm_sec & 1);
   if (freshData) {

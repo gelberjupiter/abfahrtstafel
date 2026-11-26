@@ -32,7 +32,8 @@ Flashen per USB: `pio run -e esp32dev -t upload` bzw. `pio run -e esp32s3 -t upl
 - Erster Start: QR-Code scannen (oder WLAN "Abfahrtstafel" antippen). Das Einrichtungsfenster öffnet sich
   von selbst, WLAN wählen, Passwort eingeben. Die Tafel prüft das Passwort sofort.
 - Einstellungen: http://abfahrtstafel.local (Handy im selben WLAN). Der QR-Code dazu erscheint beim Start
-  nur, solange noch etwas einzurichten ist (nach der WLAN-Einrichtung oder ohne Haltestelle).
+  nach der WLAN-Einrichtung (oder ohne Haltestelle) für 30 s; wird er nicht gescannt, startet die Tafel
+  mit den Standard-Einstellungen.
 - BOOT kurz drücken: QR-Code zur Einstellungsseite (nachts: Tafel 2 Minuten einschalten).
 - BOOT 5 s halten: WLAN zurücksetzen.
 

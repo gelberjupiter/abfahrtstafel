@@ -164,6 +164,7 @@ async function findLines(s){
   return false}
 const PLAIN=['T','B','NFT','NFB','TRAM','BUS',''];
 const PRESETS={
+  'LED-Orange':{bg:'#000000',hdr:'#000000',line:'#000000',text:'#ff8000',delay:'#ffd000',muted:'#a05000',go:'#ff2a2a'},
   'SBB-Blau':{bg:'#1a2ab0',hdr:'#101878',line:'#4055d8',text:'#ffffff',delay:'#ffde15',muted:'#b4b8e6',go:'#ff4a3d'},
   'LED-Tafel':{bg:'#000000',hdr:'#000000',line:'#2a2a2a',text:'#ffb000',delay:'#ff5a00',muted:'#8a6a20',go:'#ff2a2a'},
   'Dunkel':{bg:'#15171c',hdr:'#0b0c0f',line:'#2c303a',text:'#e8e8ea',delay:'#ffcc33',muted:'#8b90a0',go:'#ff5a4d'}};
@@ -275,7 +276,7 @@ function setCols(c){
   }
   markPreset();
 }
-for(const n in PRESETS){const b=document.createElement('button');b.type='button';b.className='sec';b.textContent=n;b.onclick=()=>{setCols(PRESETS[n]);if(n==="LED-Tafel")setFont("pixel")};$('pre').appendChild(b)}
+for(const n in PRESETS){const b=document.createElement('button');b.type='button';b.className='sec';b.textContent=n;b.onclick=()=>{setCols(PRESETS[n]);if(n.startsWith("LED"))setFont("pixel")};$('pre').appendChild(b)}
 
 // Zweimal tippen zum Bestätigen
 function confirmBtn(b,text,url,done){
@@ -318,6 +319,7 @@ async function load(){
   SAVED=[...$('sts').children];showStatus(D.status);
   $('non').checked=D.night.on;$('nfrom').value=D.night.from;$('nto').value=D.night.to;$('non').onchange();
   setCols(D.colors);setFont(D.font||"sans");
+  if(D.fixedFont){$('font').style.display='none';$('font').previousElementSibling.style.display='none'}
 }
 $('cp').onclick=async()=>{const t=$('url').href;
   try{await navigator.clipboard.writeText(t)}catch(e){const i=document.createElement('textarea');i.value=t;document.body.append(i);i.select();document.execCommand('copy');i.remove()}
