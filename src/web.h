@@ -164,7 +164,7 @@ async function findLines(s){
   return false}
 const PLAIN=['T','B','NFT','NFB','TRAM','BUS',''];
 const PRESETS={
-  'LED-Orange':{bg:'#000000',hdr:'#000000',line:'#000000',text:'#ff8000',delay:'#ffd000',muted:'#a05000',go:'#ff2a2a'},
+  'LED-Orange':{bg:'#000000',hdr:'#000000',line:'#000000',text:'#ff8000',delay:'#ffd000',muted:'#d87800',go:'#ff2a2a'},
   'SBB-Blau':{bg:'#1a2ab0',hdr:'#101878',line:'#4055d8',text:'#ffffff',delay:'#ffde15',muted:'#b4b8e6',go:'#ff4a3d'},
   'LED-Tafel':{bg:'#000000',hdr:'#000000',line:'#2a2a2a',text:'#ffb000',delay:'#ff5a00',muted:'#8a6a20',go:'#ff2a2a'},
   'Dunkel':{bg:'#15171c',hdr:'#0b0c0f',line:'#2c303a',text:'#e8e8ea',delay:'#ffcc33',muted:'#8b90a0',go:'#ff5a4d'}};

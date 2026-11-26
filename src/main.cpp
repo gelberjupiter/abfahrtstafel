@@ -70,8 +70,8 @@ static const int PAD_X = 4, TITLE_W = 96, CLK_GAP = 4, COL_GAP = 4;
 static const int BADGE_X = 3, BADGE_MIN = 21, BADGE_MAX = 27, BADGE_PAD = 6, BADGE_R = 2, BADGE_TXT = 4;
 static const int ITAL_W = 40, ITAL_H = 16, ITAL_BASE = 12;
 static const int FLAP_W = 9, FLAP_P = 10, FLAP_H = 18, FLAP_TOP = 2, FLAP_PADX = 3, HDR_FLAP_TOP = 0;
-// LED-Punkte: Raster 2 px, Punkt 1 px (dunkle Lücken wie bei einer echten LED-Matrix)
-static const int DOT_P = 2, DOT_S = 1, HDR_GRID_Y = 0, PIX_DEST_MAX = 48, STALE_DX = 30, STALE_DX_FLAP = 30, STALE_R = 2;
+// LED-Punkte: Raster 2 px, Schrift in vollen 2x2-Punkten (hell), Hintergrundraster 1 px
+static const int DOT_P = 2, DOT_S = 2, GRID_S = 1, HDR_GRID_Y = 0, PIX_DEST_MAX = 48, STALE_DX = 30, STALE_DX_FLAP = 30, STALE_R = 2;
 static const int COLON_S = 2, COLON_Y1 = 9, COLON_Y2 = 4;
 static const int MSG_X = PAD_X;
 // Textbildschirme, Update, QR
@@ -87,7 +87,7 @@ static const int PAD_X = 8, TITLE_W = 220, CLK_GAP = 4, COL_GAP = 10;
 static const int BADGE_X = 6, BADGE_MIN = 42, BADGE_MAX = 50, BADGE_PAD = 12, BADGE_R = 3, BADGE_TXT = 6;
 static const int ITAL_W = 64, ITAL_H = 24, ITAL_BASE = 18;
 static const int FLAP_W = 15, FLAP_P = 17, FLAP_H = 27, FLAP_TOP = 3, FLAP_PADX = 5, HDR_FLAP_TOP = HDR_BASE - 22;
-static const int DOT_P = 3, DOT_S = 2, HDR_GRID_Y = 1, PIX_DEST_MAX = 84, STALE_DX = 42, STALE_DX_FLAP = 48, STALE_R = 4;
+static const int DOT_P = 3, DOT_S = 2, GRID_S = 2, HDR_GRID_Y = 1, PIX_DEST_MAX = 84, STALE_DX = 42, STALE_DX_FLAP = 48, STALE_R = 4;
 static const int COLON_S = 3, COLON_Y1 = 14, COLON_Y2 = 6;
 static const int MSG_X = DEST_X;
 static const int TXT_X = 14, TXT_Y = 84, TXT_STEP = 28;
@@ -108,7 +108,7 @@ const ColorDef COLORS[] = {
 #ifdef LCD_SMALL  // LED-Anzeige: Orange auf Schwarz
   {"bg", "Hintergrund", "#000000"}, {"hdr", "Kopfzeile", "#000000"},
   {"line", "Trennlinien", "#000000"}, {"text", "Text", "#ff8000"},
-  {"delay", "Verspätung", "#ffd000"}, {"muted", "Hinweise", "#a05000"},
+  {"delay", "Verspätung", "#ffd000"}, {"muted", "Hinweise", "#d87800"},
   {"go", "Jetzt los", "#ff2a2a"},
 #else
   {"bg", "Hintergrund", "#1a2ab0"}, {"hdr", "Kopfzeile", "#101878"},
@@ -369,8 +369,8 @@ inline uint16_t dimDot(uint16_t bg) { return tft.alphaBlend(40, C_WHITE, bg); }
 void dotGrid(TFT_eSPI& g, int h, int yOff, uint16_t bg) {
   if (!pixelFont) return;
   const uint16_t c = dimDot(bg);
-  for (int y = yOff; y + DOT_S <= h; y += DOT_P)
-    for (int x = 0; x + DOT_S <= SCREEN_W; x += DOT_P) g.fillRect(x, y, DOT_S, DOT_S, c);
+  for (int y = yOff; y + GRID_S <= h; y += DOT_P)
+    for (int x = 0; x + GRID_S <= SCREEN_W; x += DOT_P) g.fillRect(x, y, GRID_S, GRID_S, c);
 }
 
 void setFont(TFT_eSPI& g, int size) {
@@ -571,6 +571,7 @@ void loadConfig() {
     for (int i = 0; i < NUM_COLORS; i++) colHex[i] = COLORS[i].def;
     applyColors();
   }
+  if (colHex[5] == "#a05000") { colHex[5] = COLORS[5].def; applyColors(); }  // früheres, zu dunkles Hinweis-Orange
 #endif
 }
 
