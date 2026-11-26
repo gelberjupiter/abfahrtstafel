@@ -319,7 +319,8 @@ async function load(){
   SAVED=[...$('sts').children];showStatus(D.status);
   $('non').checked=D.night.on;$('nfrom').value=D.night.from;$('nto').value=D.night.to;$('non').onchange();
   setCols(D.colors);setFont(D.font||"sans");
-  if(D.fixedFont){$('font').style.display='none';$('font').previousElementSibling.style.display='none'}
+  if(D.fixedFont){for(const id of['font','pre']){$(id).style.display='none';$(id).previousElementSibling.style.display='none'}
+    const dt=$('cols').closest('details');dt.open=true;dt.querySelector('summary').style.display='none'}
 }
 $('cp').onclick=async()=>{const t=$('url').href;
   try{await navigator.clipboard.writeText(t)}catch(e){const i=document.createElement('textarea');i.value=t;document.body.append(i);i.select();document.execCommand('copy');i.remove()}

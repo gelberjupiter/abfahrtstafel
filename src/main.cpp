@@ -435,7 +435,15 @@ void drawLabel(TFT_eSPI& g, const char* s, int x, int baseline, int maxW, uint16
 // ===================== Einstellungen =====================
 void applyColors() {
   for (int i = 0; i < NUM_COLORS; i++) col[i] = hexTo565(colHex[i]);
+#ifdef LCD_SMALL
+  // LED-Anzeige: nur zwei Farben – Kopfzeile/Linien wie der Hintergrund, aller Text in der Schriftfarbe
+  col[1] = col[2] = col[0];
+  col[4] = col[5] = col[6] = col[3];
+#endif
 }
+
+// Farben, die man auf der Webseite einstellen kann (kleines Display: nur Hintergrund und Schrift)
+inline bool colorEditable(int i) { return !SMALL_LCD || i == 0 || i == 3; }
 
 void applyConfig(JsonVariantConst j) {
   String title = cfgTitle;
@@ -528,7 +536,8 @@ void configToJson(JsonDocument& d, bool forWeb) {
   for (int i = 0; i < NUM_COLORS; i++) {
     d["colors"][COLORS[i].key] = colHex[i];
     if (forWeb) {
-      d["names"][COLORS[i].key] = COLORS[i].name;
+      if (!colorEditable(i)) continue;
+      d["names"][COLORS[i].key] = SMALL_LCD && i == 3 ? "Schrift" : COLORS[i].name;
       d["defaults"][COLORS[i].key] = COLORS[i].def;
     }
   }
