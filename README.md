@@ -39,6 +39,8 @@ Flashen per USB: `pio run -e esp32dev -t upload` bzw. `pio run -e esp32s3 -t upl
 ## Fehlerbehandlung
 
 - Fällt ein Fahrplan-Server aus, wird automatisch der andere verwendet; die Tafel zeigt den Grund an.
+- Zeitserver (NTP) gesperrt, z. B. in Gäste-WLANs: Die Uhrzeit kommt dann aus der Antwort eines Webservers
+  und wird alle 6 Stunden nachgestellt.
 - WLAN weg: neuer Versuch alle 30 s; nach 10 min Einrichtungsmodus, der das alte WLAN jede Minute weiter versucht.
 - Hängt etwas länger (kein Abruf, 1 h kein Server), startet die Tafel still neu (nicht nachts).
 

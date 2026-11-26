@@ -14,6 +14,7 @@
 #include <TFT_eSPI.h>
 #include <qrcode.h>
 #include <time.h>
+#include <esp_sntp.h>
 #ifdef LCD_SMALL
 #include "SourceSansBold15.h"
 #include "SourceSansBold13.h"
@@ -876,6 +877,50 @@ void checkUpdate() {
 }
 
 // Haltestellen jede Minute, Züge seltener (search.ch erlaubt 1000 Verbindungsabfragen pro Tag)
+// ===================== Uhrzeit =====================
+// NTP ist in manchen Gäste-/Firmen-WLANs gesperrt. Dann kommt die Uhrzeit aus dem
+// "Date"-Header einer gewöhnlichen Webseite (geht überall, wo Surfen geht).
+volatile bool ntpSynced = false;
+
+bool httpTime() {
+  static const char* URLS[] = {"http://www.google.com/generate_204", "https://search.ch/", "https://transport.opendata.ch/"};
+  static const char* HDR[] = {"Date"};
+  static const char* MON = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  for (const char* url : URLS) {
+    WiFiClient plain;
+    WiFiClientSecure sec;
+    sec.setInsecure();
+    const bool https = !strncmp(url, "https", 5);
+    HTTPClient h;
+    h.setConnectTimeout(5000);
+    h.setTimeout(5000);
+    if (!(https ? h.begin(sec, url) : h.begin(plain, url))) continue;
+    h.collectHeaders(HDR, 1);
+    const int code = h.sendRequest("HEAD");
+    const String d = h.header("Date");  // "Wed, 26 Nov 2026 10:42:00 GMT"
+    h.end();
+    char mon[4] = "";
+    int day, year, hh, mm, ss;
+    if (code <= 0 || d.length() < 25 ||
+        sscanf(d.c_str() + 5, "%d %3s %d %d:%d:%d", &day, mon, &year, &hh, &mm, &ss) != 6)
+      continue;
+    const char* p = strstr(MON, mon);
+    if (!p || (p - MON) % 3) continue;
+    const int mo = (p - MON) / 3 + 1;
+    // Tage seit 1970-01-01 (UTC), ohne mktime/Zeitzone
+    const int y = year - (mo <= 2);
+    const int era = y / 400, yoe = y - era * 400;
+    const int doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const long days = era * 146097L + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    const time_t t = days * 86400L + hh * 3600 + mm * 60 + ss;
+    if (t < 1700000000) continue;
+    timeval tv = {t, 0};
+    settimeofday(&tv, nullptr);
+    return true;
+  }
+  return false;
+}
+
 void fetchTask(void*) {
   tls.setInsecure();
   tls.setHandshakeTimeout(15);
@@ -883,10 +928,15 @@ void fetchTask(void*) {
   http.setTimeout(8000);
   http.setConnectTimeout(5000);
   checkUpdate();
-  uint32_t lastUpdateCheck = millis(), lastReconnect = 0, gen = 0;
+  uint32_t lastUpdateCheck = millis(), lastReconnect = 0, gen = 0, lastHttpTime = millis();
   uint32_t due[MAX_ST] = {};
   for (;;) {
     fetchAlive = millis();
+    // ohne NTP die Uhr alle 6 Stunden über den Webserver nachstellen
+    if (!ntpSynced && !nightNow && WiFi.status() == WL_CONNECTED && millis() - lastHttpTime > 6 * 3600000UL) {
+      lastHttpTime = millis();
+      httpTime();
+    }
     if (!nightNow && millis() - lastUpdateCheck > UPDATE_INTERVAL_MS) {
       lastUpdateCheck = millis();
       checkUpdate();
@@ -1739,9 +1789,16 @@ void setup() {
   MDNS.begin(HOSTNAME);
   MDNS.addService("http", "tcp", 80);
   drawStatus("Warte auf Uhrzeit...");
+  sntp_set_time_sync_notification_cb([](timeval*) { ntpSynced = true; });
   configTzTime(TZ_CH, "ch.pool.ntp.org", "pool.ntp.org", "time.google.com");
-  for (uint32_t start = millis(); time(nullptr) < 1700000000; delay(200))
+  // NTP zuerst; kommt nach 8 s nichts, die Uhrzeit vom Webserver holen (alle 10 s neu versuchen)
+  for (uint32_t start = millis(), lastTry = 0; time(nullptr) < 1700000000; delay(200)) {
+    if (millis() - start > 8000 && (!lastTry || millis() - lastTry > 10000)) {
+      lastTry = millis();
+      if (httpTime()) break;
+    }
     if (millis() - start > 60000) quietRestart();
+  }
 
   setupWeb();
   fetchAlive = serverSeen = millis();
