@@ -70,8 +70,8 @@ static const int PAD_X = 4, TITLE_W = 96, CLK_GAP = 4, COL_GAP = 4;
 static const int BADGE_X = 3, BADGE_MIN = 21, BADGE_MAX = 27, BADGE_PAD = 6, BADGE_R = 2, BADGE_TXT = 4;
 static const int ITAL_W = 40, ITAL_H = 16, ITAL_BASE = 12;
 static const int FLAP_W = 9, FLAP_P = 10, FLAP_H = 18, FLAP_TOP = 2, FLAP_PADX = 3, HDR_FLAP_TOP = 0;
-// LED-Punkte: Raster 2 px, Schrift in vollen 2x2-Punkten (hell), Hintergrundraster 1 px
-static const int DOT_P = 2, DOT_S = 2, GRID_S = 1, HDR_GRID_Y = 0, PIX_DEST_MAX = 48, STALE_DX = 30, STALE_DX_FLAP = 30, STALE_R = 2;
+// LED-Punkte: Raster 2 px, Punkt 1 px (dunkle Lücken wie bei einer echten LED-Matrix)
+static const int DOT_P = 2, DOT_S = 1, GRID_S = 1, HDR_GRID_Y = 0, PIX_DEST_MAX = 48, STALE_DX = 30, STALE_DX_FLAP = 30, STALE_R = 2;
 static const int COLON_S = 2, COLON_Y1 = 9, COLON_Y2 = 4;
 static const int MSG_X = PAD_X;
 // Textbildschirme, Update, QR
@@ -107,9 +107,9 @@ struct ColorDef { const char* key; const char* name; const char* def; };
 const ColorDef COLORS[] = {
 #ifdef LCD_SMALL  // LED-Anzeige: Orange auf Schwarz
   {"bg", "Hintergrund", "#000000"}, {"hdr", "Kopfzeile", "#000000"},
-  {"line", "Trennlinien", "#000000"}, {"text", "Text", "#ff8000"},
-  {"delay", "Verspätung", "#ffd000"}, {"muted", "Hinweise", "#d87800"},
-  {"go", "Jetzt los", "#ff2a2a"},
+  {"line", "Trennlinien", "#000000"}, {"text", "Text", "#ffa020"},
+  {"delay", "Verspätung", "#fff040"}, {"muted", "Hinweise", "#ff9010"},
+  {"go", "Jetzt los", "#ff3a3a"},
 #else
   {"bg", "Hintergrund", "#1a2ab0"}, {"hdr", "Kopfzeile", "#101878"},
   {"line", "Trennlinien", "#4055d8"}, {"text", "Text", "#ffffff"},
@@ -571,7 +571,11 @@ void loadConfig() {
     for (int i = 0; i < NUM_COLORS; i++) colHex[i] = COLORS[i].def;
     applyColors();
   }
-  if (colHex[5] == "#a05000") { colHex[5] = COLORS[5].def; applyColors(); }  // früheres, zu dunkles Hinweis-Orange
+  // frühere, zu dunkle LED-Farben -> neue, hellere Standardfarben
+  if (colHex[0] == "#000000" && colHex[3] == "#ff8000") {
+    for (int i = 0; i < NUM_COLORS; i++) colHex[i] = COLORS[i].def;
+    applyColors();
+  }
 #endif
 }
 
